@@ -1,0 +1,65 @@
+diff --git a/components/audio_stream/http_stream.c b/components/audio_stream/http_stream.c
+index 71d5e8b..ad2abe1 100644
+--- a/components/audio_stream/http_stream.c
++++ b/components/audio_stream/http_stream.c
+@@ -139,6 +139,9 @@ static esp_codec_type_t get_audio_type(const char *content_type)
+     if (strncasecmp(content_type, "audio/x-scpls", strlen("audio/x-scpls")) == 0) {
+         return ESP_AUDIO_TYPE_PLS;
+     }
++    if (strncasecmp(content_type, "audio/L16", strlen("audio/L16")) == 0) {
++        return ESP_AUDIO_TYPE_LPCM;
++    }
+     return ESP_CODEC_TYPE_UNKNOW;
+ }
+ 
+@@ -155,8 +158,35 @@ static esp_err_t _http_event_handle(esp_http_client_event_t *evt)
+         return ESP_OK;
+     }
+     if (strcasecmp(evt->header_key, "Content-Type") == 0) {
++    	esp_codec_type_t codec;
++
+         ESP_LOGD(TAG, "%s = %s", evt->header_key, evt->header_value);
+-        audio_element_set_codec_fmt(el, get_audio_type(evt->header_value));
++
++        codec = get_audio_type(evt->header_value);
++        audio_element_set_codec_fmt(el, codec);
++        if (codec == ESP_AUDIO_TYPE_LPCM) {
++        	char *str = strtok(evt->header_value, ";=");
++        	int rate = -1, ch = -1, bits = 16;
++
++        	while (str != NULL) {
++        		if (strcasecmp(str, "rate") == 0) {
++        			str = strtok (NULL, ";=");
++        			rate = atoi(str);
++        		}
++        		if (strcasecmp(str, "channels") == 0) {
++        			str = strtok (NULL, ";=");
++        			ch = atoi(str);
++        		}
++        		str = strtok (NULL, ";=");
++        	}
++
++        	if ((rate > 0) && (ch > 0) && (bits > 0)) {
++        		audio_element_set_music_info(el, rate, ch, bits);
++        	}
++        	else {
++        		ESP_LOGE(TAG, "couldn't get LPCM settings");
++        	}
++        }
+     }
+     else if (strcasecmp(evt->header_key, "Content-Encoding") == 0) {
+         http_stream_t *http = (http_stream_t *)audio_element_getdata(el);
+@@ -587,6 +617,7 @@ _stream_redirect:
+     }
+     http->is_open = true;
+     audio_element_report_codec_fmt(self);
++    audio_element_report_info(self);
+     return ESP_OK;
+ }
+ 
+diff --git a/components/esp-adf-libs b/components/esp-adf-libs
+--- a/components/esp-adf-libs
++++ b/components/esp-adf-libs
+@@ -1 +1 @@
+-Subproject commit 01336f1908bfd0f3f567382d40e872eaa969884d
++Subproject commit 01336f1908bfd0f3f567382d40e872eaa969884d-dirty

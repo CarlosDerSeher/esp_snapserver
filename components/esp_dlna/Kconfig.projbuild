@@ -1,0 +1,7 @@
+menu "ESP DLNA Configuration"
+
+config MEDIA_PROTOCOL_LIB_ENABLE
+    bool "Enable Media Protocol Library"
+    default "y"
+
+endmenu
