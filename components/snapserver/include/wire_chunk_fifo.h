@@ -38,11 +38,13 @@ enum {
 };
 
 esp_err_t wire_chunk_fifo_init(size_t mSize, uint32_t buf_ms);
-esp_err_t wire_chunk_fifo_register_handler(esp_event_handler_t event_handler, void* event_handler_arg);
-esp_err_t wire_chunk_fifo_unregister_handler(esp_event_handler_t event_handler);
+void wire_chunk_fifio_notify_register_task(TaskHandle_t handle);
+void wire_chunk_fifio_notify_unregister_task(TaskHandle_t handle);
+void wire_chunk_fifio_notify_new_chnk(void);
 esp_err_t wire_chunk_fifo_insert(wire_chunk_tailq_t *element);
 bool wire_chunk_fifo_empty(void);
-bool wire_chunk_fifo_full(void) ;
+bool wire_chunk_fifo_full(void);
+esp_err_t wire_chunk_fifo_clear(void);
 esp_err_t wire_chunk_fifo_remove_oldest(void);
 wire_chunk_tailq_t *wire_chunk_fifo_get_newest(void);
 wire_chunk_tailq_t *wire_chunk_fifo_get_oldest(void);

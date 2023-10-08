@@ -142,7 +142,8 @@ static FLAC__StreamMetadata *metadata[2] = {NULL, NULL};
 static flac_codec_header_t flac_codecHeader = {0, NULL};
 static TaskHandle_t flac_encoder_task_handle = NULL;
 
-
+void flac_encoder_deinit(void);
+void flac_encoder_init(void);
 
 
 
@@ -495,7 +496,9 @@ static void flac_encoder_task(void *pvParameters) {
 //
 //CLEAN_UP:
 //    close(listen_sock);
-//    vTaskDelete(NULL);
+//    vTaskDelete(NULL);Semaphore count %d, diff %lld", uxSemaphoreGetCount(wire_chunk_fifo.countSemaphore), esp_timer_get_time() - oldTime);
+//	oldTime = esp_timer_get_time();
+
 //}
 
 int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_num, char *buffer, int max_buffer_len)
@@ -592,6 +595,8 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
         case AVT_SET_TRACK_URI:
             ESP_LOGI(TAG, "SetAVTransportURI=%s", buffer);
 
+            flac_encoder_init();
+
 //            esp_audio_state_t state = { 0 };
 //            esp_audio_state_get(player, &state);
 //            if ((track_uri != NULL) && (state.status == AUDIO_STATUS_RUNNING) && strcasecmp(track_uri, buffer)) {
@@ -661,10 +666,10 @@ static int _http_stream_event_handle(http_stream_event_msg_t *msg)
 	if (msg->event_id == HTTP_STREAM_RESOLVE_ALL_TRACKS) {
         return ESP_OK;
     }
-    if (msg->event_id == HTTP_STREAM_FINISH_TRACK) {
+	else if (msg->event_id == HTTP_STREAM_FINISH_TRACK) {
         return http_stream_next_track(msg->el);
     }
-    if (msg->event_id == HTTP_STREAM_FINISH_PLAYLIST) {
+    else if (msg->event_id == HTTP_STREAM_FINISH_PLAYLIST) {
         return http_stream_restart(msg->el);
     }
 
@@ -684,15 +689,15 @@ static void audio_player_init(void)
     http_cfg.event_handle = _http_stream_event_handle;
     http_cfg.type = AUDIO_STREAM_READER;
     http_cfg.enable_playlist_parser = true;
-    http_cfg.task_prio = 10;
+//    http_cfg.task_prio = 10;
     http_cfg.task_core = tskNO_AFFINITY;
     http_cfg.stack_in_ext = true;
-    http_cfg.out_rb_size = 44100ul * 4ul * 2;
+    http_cfg.out_rb_size = (44100 * 4 * 4) / 4;	// buffer for 4 * 0.25s
     http_stream_reader = http_stream_init(&http_cfg);
 
     raw_stream_cfg_t raw_cfg = RAW_STREAM_CFG_DEFAULT();
     raw_cfg.type = AUDIO_STREAM_READER;
-    raw_cfg.out_rb_size = (44100 * 4 * 2) / 3;	// buffer for 1.5s
+    raw_cfg.out_rb_size = (44100 * 4 * 4) / 4;	// buffer for 4 * 0.25s
     raw_stream_reader = raw_stream_init(&raw_cfg);
 
     audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
@@ -829,6 +834,8 @@ void flac_encoder_deinit(void)  {
 
 		encoder = NULL;
 	}
+
+	wire_chunk_fifo_clear();
 }
 
 /**
@@ -851,7 +858,7 @@ void flac_encoder_init(void) {
 		return;
 	}
 
-	ok &= FLAC__stream_encoder_set_verify(encoder, false);//true);	// true generates FLAC__STREAM_ENCODER_VERIFY_MISMATCH_IN_AUDIO_DATA wit -O2
+	ok &= FLAC__stream_encoder_set_verify(encoder, false);//true);	// true generates FLAC__STREAM_ENCODER_VERIFY_MISMATCH_IN_AUDIO_DATA with -O2
 	ok &= FLAC__stream_encoder_set_compression_level(encoder, 1);	// 1 fastest, 8 slowest, 3 is the maximum esp32 can do in real time with default block sizes
 																	// 						 5 with block size of 2*READSIZE
 																	// 						 5 with block size of READSIZE

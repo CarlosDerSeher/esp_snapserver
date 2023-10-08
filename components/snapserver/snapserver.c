@@ -241,7 +241,7 @@ void send_server_settings(snapclient_t *client) {
 	while (to_write > 0) {
 		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
 		if (written < 0) {
-			ESP_LOGE(TAG, "Error occurred during sending: %s", strerror(errno));
+			ESP_LOGE(TAG, "Error occurred during sending server settings: %s", strerror(errno));
 
 			break;
 		}
@@ -319,7 +319,7 @@ esp_err_t send_codec_header(int sock) {
 	while (to_write > 0) {
 		int written = send(sock, tmp + (len - to_write), to_write, 0);
 		if (written < 0) {
-			ESP_LOGE(TAG, "Error occurred during sending: %s", strerror(errno));
+			ESP_LOGE(TAG, "Error occurred during sending codec header: %s", strerror(errno));
 
 			break;
 		}
@@ -371,7 +371,7 @@ void send_time_message(snapclient_t *client, time_message_t *msg) {
 	while (to_write > 0) {
 		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
 		if (written < 0) {
-			ESP_LOGE(TAG, "Error occurred during sending: %s", strerror(errno));
+			ESP_LOGE(TAG, "Error (%d) occurred during sending time message: %s", errno, strerror(errno));
 
 			break;
 		}
@@ -388,7 +388,7 @@ void send_time_message(snapclient_t *client, time_message_t *msg) {
 /**
  *
  */
-void send_wire_chunk(int sock, wire_chunk_message_t *msg) {
+esp_err_t send_wire_chunk(int sock, wire_chunk_message_t *msg) {
 	base_message_t baseMsg = {
 			  .type = SNAPCAST_MESSAGE_WIRE_CHUNK,
 			  .id = 0,
@@ -403,6 +403,7 @@ void send_wire_chunk(int sock, wire_chunk_message_t *msg) {
 			  },
 			  .size = 0,
 	};
+	esp_err_t err = ESP_OK;
 
 	baseMsg.size = sizeof(msg->timestamp) + sizeof(msg->size) + msg->size;
 
@@ -424,7 +425,9 @@ void send_wire_chunk(int sock, wire_chunk_message_t *msg) {
 	while (to_write > 0) {
 		int written = send(sock, tmp + (len - to_write), to_write, 0);
 		if (written < 0) {
-			ESP_LOGE(TAG, "Error occurred during sending: %s", strerror(errno));
+			ESP_LOGE(TAG, "Error (%d) occurred during sending wire chunk: %s", errno, strerror(errno));
+
+			err = ESP_FAIL;
 
 			break;
 		}
@@ -436,6 +439,8 @@ void send_wire_chunk(int sock, wire_chunk_message_t *msg) {
 	if (errno == 0) {
 		ESP_LOGD(TAG, "wire chunk sent");
 	}
+
+	return err;
 }
 
 /**
@@ -453,6 +458,33 @@ void send_new_wire_chunk( void* event_handler_arg,
 	send_wire_chunk(*sock, newChnk);
 
 //	ESP_LOGI(TAG, "sent next chunk");
+}
+
+void send_new_wire_chunk_task( void *pvParameter)
+{
+	int sock = *((int *)pvParameter);
+	esp_err_t err;
+	TaskHandle_t handle = xTaskGetCurrentTaskHandle();
+
+	wire_chunk_fifio_notify_register_task(handle);
+
+	do {
+		wire_chunk_tailq_t *element;
+		wire_chunk_message_t *newChnk;
+		uint32_t val;
+
+		xTaskNotifyWait(0, 0, &val, portMAX_DELAY);
+
+		element = wire_chunk_fifo_get_newest();
+		newChnk = element->chunk;
+
+		err = send_wire_chunk(sock, newChnk);
+	} while(err == ESP_OK);
+//	ESP_LOGI(TAG, "sent next chunk");
+
+	wire_chunk_fifio_notify_unregister_task(handle);
+
+	vTaskDelete(NULL);
 }
 
 /**
@@ -506,7 +538,8 @@ static void handle_client_task(void *pvParameters)
 
             size = baseMessage.size;
 //            ESP_LOGI(TAG, "base message size %d", size);
-            typedMsgBuffer = (char *)malloc(size);
+            //typedMsgBuffer = (char *)malloc(size);
+            typedMsgBuffer = (char *)heap_caps_malloc(size, MALLOC_CAP_8BIT);
             if (typedMsgBuffer) {
 				len = recv(sock, typedMsgBuffer, size, 0);
 				if (len < 0) {
@@ -531,9 +564,12 @@ static void handle_client_task(void *pvParameters)
 
 						send_server_settings(newClient);
 						send_codec_header(sock);
-//						send_initial_wire_chunks_all(sock);
+						send_initial_wire_chunks_all(sock);
 
-						wire_chunk_fifo_register_handler(send_new_wire_chunk, &sock);
+						//wire_chunk_fifo_register_handler(send_new_wire_chunk, &sock);
+				        char tName[32];
+				        sprintf(tName, "nWcT_%d", sock);
+						xTaskCreate(send_new_wire_chunk_task, (const char *)tName, 2048, (void*)&sock, 8, NULL);
 
 						state = 1;
 					}
@@ -563,8 +599,6 @@ static void handle_client_task(void *pvParameters)
 
     shutdown(sock, 0);
     close(sock);
-
-    wire_chunk_fifo_unregister_handler(send_new_wire_chunk);
 
     vTaskDelete(NULL);
 }
@@ -613,7 +647,10 @@ static void snapserver_task(void *pvParameters)
         return;
     }
     int opt = 1;
+    int timeout = 1000;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+//    setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+//    setsockopt(listen_sock, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
 #if defined(CONFIG_SNAPSERVER_IPV4) && defined(CONFIG_SNAPSERVER_IPV6)
     // Note that by default IPV6 binds to both protocols, it is must be disabled
     // if both protocols used at the same time (used in CI)
@@ -644,7 +681,7 @@ static void snapserver_task(void *pvParameters)
         int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
         if (sock < 0) {
             ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            break;
+            continue;
         }
 
         // Set tcp keepalive option
@@ -666,7 +703,7 @@ static void snapserver_task(void *pvParameters)
 
         char tName[32];
         sprintf(tName, "cTsk_%d", sock);
-        xTaskCreate(handle_client_task, (const char *)tName, 4096, (void*)&sock, 15, NULL);
+        xTaskCreate(handle_client_task, (const char *)tName, 4096, (void*)&sock, 8, NULL);
     }
 
 CLEAN_UP:

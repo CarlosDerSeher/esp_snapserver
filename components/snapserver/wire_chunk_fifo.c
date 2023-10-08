@@ -24,10 +24,13 @@ static size_t maxSize;
 
 static int64_t oldTime = 0;
 
-static esp_event_loop_handle_t loop_handle = NULL;
-
 /* Event source task related definitions */
 ESP_EVENT_DEFINE_BASE(WIRE_CHUNK_FIFO_EVENTS);
+
+static TaskHandle_t tasksToNotifiy = NULL;
+static SemaphoreHandle_t oldestRemoved;
+
+static bool init = false;
 
 /**
  *
@@ -37,15 +40,24 @@ esp_err_t wire_chunk_fifo_insert(wire_chunk_tailq_t *element) {
 		return ESP_FAIL;
 	}
 
+	if (!wire_chunk_fifo.countSemaphore || !wire_chunk_fifo.mux) {
+		return ESP_FAIL;
+	}
+
 	xSemaphoreTake(wire_chunk_fifo.countSemaphore, portMAX_DELAY);
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	TAILQ_INSERT_TAIL(wire_chunk_fifo.wire_chunk_tail_queue, element, tailq);
 	xSemaphoreGive(wire_chunk_fifo.mux);
 
-	esp_event_post_to(loop_handle, WIRE_CHUNK_FIFO_EVENTS, NEW_WIRE_CHUNK_EVENT, NULL, 0, portMAX_DELAY);
+	wire_chunk_fifio_notify_new_chnk();
 
-	ESP_LOGI(TAG, "inserted new chunk. Semaphore count %d, diff %lld", uxSemaphoreGetCount(wire_chunk_fifo.countSemaphore), esp_timer_get_time() - oldTime);
+#if 0
+	ESP_LOGI(TAG, "inserted new chunk. Semaphore count %d, diff %lld, free %d, block %d", uxSemaphoreGetCount(wire_chunk_fifo.countSemaphore),
+																						  esp_timer_get_time() - oldTime,
+																						  heap_caps_get_free_size(MALLOC_CAP_8BIT),
+																						  heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 	oldTime = esp_timer_get_time();
+#endif
 
 	return ESP_OK;
 }
@@ -56,7 +68,9 @@ esp_err_t wire_chunk_fifo_insert(wire_chunk_tailq_t *element) {
 bool wire_chunk_fifo_empty(void) {
 	bool ret;
 
-	// TODO: assert if mux does not exist
+	if (!wire_chunk_fifo.mux) {
+		return ESP_FAIL;
+	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	ret = TAILQ_EMPTY(wire_chunk_fifo.wire_chunk_tail_queue);
@@ -69,6 +83,10 @@ bool wire_chunk_fifo_empty(void) {
  *
  */
 bool wire_chunk_fifo_full(void) {
+	if (!wire_chunk_fifo.countSemaphore) {
+		return ESP_FAIL;
+	}
+
 	if (uxSemaphoreGetCount(wire_chunk_fifo.countSemaphore) == 0) {
 		return true;
 	}
@@ -79,12 +97,38 @@ bool wire_chunk_fifo_full(void) {
 /**
  *
  */
+esp_err_t wire_chunk_fifo_clear(void) {
+	wire_chunk_tailq_t *element = wire_chunk_fifo_get_oldest();
+
+	if (!wire_chunk_fifo.mux) {
+		return ESP_FAIL;
+	}
+
+	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
+	while(element) {
+		TAILQ_REMOVE(wire_chunk_fifo.wire_chunk_tail_queue, element, tailq);
+		free(element->chunk->payload);
+		element->chunk->payload = NULL;
+		free(element->chunk);
+		element->chunk = NULL;
+		free(element);
+		xSemaphoreGive(wire_chunk_fifo.countSemaphore);
+		element = TAILQ_FIRST(wire_chunk_fifo.wire_chunk_tail_queue);
+	}
+	xSemaphoreGive(wire_chunk_fifo.mux);
+
+	return ESP_OK;
+}
+
+/**
+ *
+ */
 esp_err_t wire_chunk_fifo_remove_oldest(void) {
 	wire_chunk_tailq_t *element = wire_chunk_fifo_get_oldest();
 
-//	if (!wire_chunk_fifo.countSemaphore || !wire_chunk_fifo.mux) {
-//		return ESP_FAIL;
-//	}
+	if (!wire_chunk_fifo.countSemaphore || !wire_chunk_fifo.mux) {
+		return ESP_FAIL;
+	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	//element = TAILQ_LAST(wire_chunk_fifo.wire_chunk_tail_queue, wire_chunk_tailq_queue_s);
@@ -110,9 +154,9 @@ esp_err_t wire_chunk_fifo_remove_oldest(void) {
 wire_chunk_tailq_t *wire_chunk_fifo_get_newest(void) {
 	wire_chunk_tailq_t *element;
 
-//	if (!wire_chunk_fifo.mux) {
-//		return NULL;
-//	}
+	if (!wire_chunk_fifo.mux) {
+		return NULL;
+	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	element = TAILQ_LAST(wire_chunk_fifo.wire_chunk_tail_queue, wire_chunk_tailq_queue_s);
@@ -127,9 +171,9 @@ wire_chunk_tailq_t *wire_chunk_fifo_get_newest(void) {
 wire_chunk_tailq_t *wire_chunk_fifo_get_oldest(void) {
 	wire_chunk_tailq_t *element;
 
-//	if (!wire_chunk_fifo.mux) {
-//		return NULL;
-//	}
+	if (!wire_chunk_fifo.mux) {
+		return NULL;
+	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	element = TAILQ_FIRST(wire_chunk_fifo.wire_chunk_tail_queue);
@@ -142,9 +186,9 @@ wire_chunk_tailq_t *wire_chunk_fifo_get_oldest(void) {
  *
  */
 wire_chunk_tailq_t *wire_chunk_fifo_get_next(wire_chunk_tailq_t *element) {
-//	if (!wire_chunk_fifo.mux) {
-//		return NULL;
-//	}
+	if (!wire_chunk_fifo.mux) {
+		return NULL;
+	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	element = TAILQ_NEXT(element, tailq);
@@ -153,8 +197,9 @@ wire_chunk_tailq_t *wire_chunk_fifo_get_next(wire_chunk_tailq_t *element) {
 	return element;
 }
 
-static SemaphoreHandle_t oldestRemoved;
-
+/**
+ *
+ */
 void remove_oldest_timer_callback(void *pvArguments) {
 	wire_chunk_fifo_remove_oldest();
 	xSemaphoreGive(oldestRemoved);
@@ -214,28 +259,25 @@ void wire_chunk_fifo_remove_oldest_task(void *pvParameters) {
 /**
  *
  */
-esp_err_t wire_chunk_fifo_register_handler(esp_event_handler_t event_handler, void* event_handler_arg) {
-	ESP_ERROR_CHECK( esp_event_handler_register_with(loop_handle, WIRE_CHUNK_FIFO_EVENTS, NEW_WIRE_CHUNK_EVENT, event_handler, event_handler_arg) );
-
-	return ESP_OK;
+void wire_chunk_fifio_notify_register_task(TaskHandle_t handle) {
+	tasksToNotifiy = handle;
 }
 
 /**
  *
  */
-esp_err_t wire_chunk_fifo_unregister_handler(esp_event_handler_t event_handler) {
-	ESP_ERROR_CHECK( esp_event_handler_unregister_with(loop_handle, WIRE_CHUNK_FIFO_EVENTS, NEW_WIRE_CHUNK_EVENT, event_handler) );
-
-	return ESP_OK;
+void wire_chunk_fifio_notify_unregister_task(TaskHandle_t handle) {
+	if (handle) {
+		tasksToNotifiy = NULL;
+	}
 }
 
 /**
  *
  */
-static void event_loop_task(void* args) {
-	while(1) {
-        esp_event_loop_run(loop_handle, pdMS_TO_TICKS(5));
-        vTaskDelay(pdMS_TO_TICKS(5));
+void wire_chunk_fifio_notify_new_chnk(void) {
+	if (tasksToNotifiy) {
+		xTaskNotify(tasksToNotifiy, 1, eSetValueWithOverwrite);
 	}
 }
 
@@ -243,6 +285,10 @@ static void event_loop_task(void* args) {
  *
  */
 esp_err_t wire_chunk_fifo_init(size_t mSize, uint32_t buf_ms) {
+	if (init)  {
+		return ESP_OK;
+	}
+
 	if (!mSize) {
 		return ESP_FAIL;
 	}
@@ -262,20 +308,12 @@ esp_err_t wire_chunk_fifo_init(size_t mSize, uint32_t buf_ms) {
 		return ESP_FAIL;
 	}
 
-    esp_event_loop_args_t loop_args = {
-        .queue_size = 1,
-        .task_name = "chnk_ev_loop",
-        .task_priority = 8,
-        .task_stack_size = 4096,
-        .task_core_id = tskNO_AFFINITY,
-    };
-	esp_event_loop_create(&loop_args, &loop_handle);
-	//xTaskCreatePinnedToCore(event_loop_task, "event_loop_task", 2048, NULL, 17, &wire_chunk_fifo_remove_oldest_taskhandle, 1);
-
 	maxSize = mSize;
 	buffer_us = buf_ms * 1000;
 
 	xTaskCreatePinnedToCore(wire_chunk_fifo_remove_oldest_task, "chk_rem_tsk", 2048, NULL, 17, &wire_chunk_fifo_remove_oldest_taskhandle, 1);
+
+	init = true;
 
 	return ESP_OK;
 }

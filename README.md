@@ -5,14 +5,14 @@ It is in a very early stage and more of a proof of concept and possiblity study 
 surprised by the result though as this little thig called ESP32 is very much capable of doing all that's needed
 to get audio playback through [esp_snapclient](https://github.com/CarlosDerSeher/snapclient). It does loads of stuff currently:
 
-* DLNA audio in input (Android App AirMusic)
+* DLNA audio (LPCM) input (Android App AirMusic) 
 
   as sample rate, bits and channels are hardcoded please ensure your device sends 44100:16:2
 * flac encoding PCM audio (44100:16:2)
 * snapserver <--> snapclient communication / protocol handling
 * stream to 1 connected esp_snapclient
 
-As stated before it is in a very early stage of development and if not started in the right order it will definitly crash:
+As stated before it is in a very early stage of development and if not started in the right order it will most certainly crash:
 
 * start esp_snapserver (wait until ready)
 * connect dlna and start playback 
