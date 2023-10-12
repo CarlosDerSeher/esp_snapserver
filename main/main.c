@@ -212,22 +212,33 @@ FLAC__StreamEncoderWriteStatus write_callback(const FLAC__StreamEncoder* encoder
 			newElement->chunk->timestamp.sec = (esp_timer_get_time() + 100000) / 1000000;
 			newElement->chunk->timestamp.usec = (esp_timer_get_time() + 100000) % 1000000;
 
+			ESP_ERROR_CHECK( wire_chunk_fifo_insert(newElement) );
+
 //			ESP_LOGI(TAG, "first time: %ld.%ld", newElement->chunk->timestamp.sec, newElement->chunk->timestamp.usec);
 		}
 		else {
-			wire_chunk_tailq_t *element = wire_chunk_fifo_get_newest();
+			wire_chunk_tailq_t *element;
 			int64_t usec, offset_us;
 
-			offset_us = ((int64_t)flackBlockSize * 1000000LL) / (int64_t)sample_rate;	// TODO: could be calculated during init phase
-			usec = (int64_t)element->chunk->timestamp.sec * 1000000LL +  (int64_t)element->chunk->timestamp.usec + offset_us;
+			wire_chunk_fifo_lock();
+			element = wire_chunk_fifo_get_newest();
+			wire_chunk_fifo_unlock();
 
-			newElement->chunk->timestamp.sec = usec / 1000000;
-			newElement->chunk->timestamp.usec = usec % 1000000;
 
-			//ESP_LOGI(TAG, "time: %ld.%ld, offset %lldus", newElement->chunk->timestamp.sec, newElement->chunk->timestamp.usec, offset_us);
+			if (element) {
+				offset_us = ((int64_t)flackBlockSize * 1000000LL) / (int64_t)sample_rate;	// TODO: could be calculated during init phase
+				usec = (int64_t)element->chunk->timestamp.sec * 1000000LL +  (int64_t)element->chunk->timestamp.usec + offset_us;
+
+				newElement->chunk->timestamp.sec = usec / 1000000;
+				newElement->chunk->timestamp.usec = usec % 1000000;
+
+				ESP_ERROR_CHECK( wire_chunk_fifo_insert(newElement) );
+
+				//ESP_LOGI(TAG, "time: %ld.%ld, offset %lldus", newElement->chunk->timestamp.sec, newElement->chunk->timestamp.usec, offset_us);
+			}
 		}
 
-		ESP_ERROR_CHECK( wire_chunk_fifo_insert(newElement) );
+
 
 
 //		xQueueSend(flacChkQHdl, &newChnk, portMAX_DELAY);

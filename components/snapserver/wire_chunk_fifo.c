@@ -10,6 +10,7 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "esp_event.h"
+#include "snapserver.h"
 
 TAILQ_HEAD(wire_chunk_tailq_queue_s, wire_chunk_tailq_s);
 
@@ -27,7 +28,18 @@ static int64_t oldTime = 0;
 /* Event source task related definitions */
 ESP_EVENT_DEFINE_BASE(WIRE_CHUNK_FIFO_EVENTS);
 
-static TaskHandle_t tasksToNotifiy = NULL;
+//typedef struct tasksToNotifiy_s tasksToNotifiy_t;
+//struct tasksToNotifiy_s {
+//	TaskHandle_t taskToNotifiy;
+//	tasksToNotifiy_t *next;
+//};
+//
+//static tasksToNotifiy_t tasksToNotifiy = {
+//		.taskToNotifiy = NULL,
+//		next = NULL
+//};
+
+static snapclient_t *subscribers[16] = {NULL};
 static SemaphoreHandle_t oldestRemoved;
 
 static bool init = false;
@@ -49,7 +61,7 @@ esp_err_t wire_chunk_fifo_insert(wire_chunk_tailq_t *element) {
 	TAILQ_INSERT_TAIL(wire_chunk_fifo.wire_chunk_tail_queue, element, tailq);
 	xSemaphoreGive(wire_chunk_fifo.mux);
 
-	wire_chunk_fifio_notify_new_chnk();
+	wire_chunk_fifio_client_info_new_chnk();
 
 #if 0
 	ESP_LOGI(TAG, "inserted new chunk. Semaphore count %d, diff %lld, free %d, block %d", uxSemaphoreGetCount(wire_chunk_fifo.countSemaphore),
@@ -98,13 +110,14 @@ bool wire_chunk_fifo_full(void) {
  *
  */
 esp_err_t wire_chunk_fifo_clear(void) {
-	wire_chunk_tailq_t *element = wire_chunk_fifo_get_oldest();
+	wire_chunk_tailq_t *element;
 
 	if (!wire_chunk_fifo.mux) {
 		return ESP_FAIL;
 	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
+	element = wire_chunk_fifo_get_oldest();
 	while(element) {
 		TAILQ_REMOVE(wire_chunk_fifo.wire_chunk_tail_queue, element, tailq);
 		free(element->chunk->payload);
@@ -123,15 +136,29 @@ esp_err_t wire_chunk_fifo_clear(void) {
 /**
  *
  */
-esp_err_t wire_chunk_fifo_remove_oldest(void) {
-	wire_chunk_tailq_t *element = wire_chunk_fifo_get_oldest();
+static esp_err_t wire_chunk_fifo_remove_oldest(void) {
+	wire_chunk_tailq_t *element;
+	esp_err_t err;
 
 	if (!wire_chunk_fifo.countSemaphore || !wire_chunk_fifo.mux) {
 		return ESP_FAIL;
 	}
 
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
-	//element = TAILQ_LAST(wire_chunk_fifo.wire_chunk_tail_queue, wire_chunk_tailq_queue_s);
+
+	element = wire_chunk_fifo_get_oldest();
+	wire_chunk_fifo_delete_element(element);
+
+	xSemaphoreGive(wire_chunk_fifo.mux);
+	xSemaphoreGive(wire_chunk_fifo.countSemaphore);
+
+	return ESP_OK;
+}
+
+/**
+ *
+ */
+esp_err_t wire_chunk_fifo_delete_element(wire_chunk_tailq_t *element) {
 	if (element) {
 		TAILQ_REMOVE(wire_chunk_fifo.wire_chunk_tail_queue, element, tailq);
 		free(element->chunk->payload);
@@ -140,10 +167,27 @@ esp_err_t wire_chunk_fifo_remove_oldest(void) {
 		element->chunk = NULL;
 		free(element);
 		element = NULL;
-
 	}
+
+	return ESP_OK;
+}
+
+esp_err_t wire_chunk_fifo_lock(void) {
+	if (!wire_chunk_fifo.mux) {
+		return ESP_FAIL;
+	}
+
+	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
+
+	return ESP_OK;
+}
+
+esp_err_t wire_chunk_fifo_unlock(void) {
+	if (!wire_chunk_fifo.mux) {
+		return ESP_FAIL;
+	}
+
 	xSemaphoreGive(wire_chunk_fifo.mux);
-	xSemaphoreGive(wire_chunk_fifo.countSemaphore);
 
 	return ESP_OK;
 }
@@ -154,13 +198,7 @@ esp_err_t wire_chunk_fifo_remove_oldest(void) {
 wire_chunk_tailq_t *wire_chunk_fifo_get_newest(void) {
 	wire_chunk_tailq_t *element;
 
-	if (!wire_chunk_fifo.mux) {
-		return NULL;
-	}
-
-	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	element = TAILQ_LAST(wire_chunk_fifo.wire_chunk_tail_queue, wire_chunk_tailq_queue_s);
-	xSemaphoreGive(wire_chunk_fifo.mux);
 
 	return element;
 }
@@ -171,13 +209,7 @@ wire_chunk_tailq_t *wire_chunk_fifo_get_newest(void) {
 wire_chunk_tailq_t *wire_chunk_fifo_get_oldest(void) {
 	wire_chunk_tailq_t *element;
 
-	if (!wire_chunk_fifo.mux) {
-		return NULL;
-	}
-
-	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	element = TAILQ_FIRST(wire_chunk_fifo.wire_chunk_tail_queue);
-	xSemaphoreGive(wire_chunk_fifo.mux);
 
 	return element;
 }
@@ -186,13 +218,7 @@ wire_chunk_tailq_t *wire_chunk_fifo_get_oldest(void) {
  *
  */
 wire_chunk_tailq_t *wire_chunk_fifo_get_next(wire_chunk_tailq_t *element) {
-	if (!wire_chunk_fifo.mux) {
-		return NULL;
-	}
-
-	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 	element = TAILQ_NEXT(element, tailq);
-	xSemaphoreGive(wire_chunk_fifo.mux);
 
 	return element;
 }
@@ -229,8 +255,13 @@ void wire_chunk_fifo_remove_oldest_task(void *pvParameters) {
 	while(1) {
 		if (wire_chunk_fifo_full() == true) {
 			int64_t currentTime_us = esp_timer_get_time();
-			wire_chunk_tailq_t *oldest = wire_chunk_fifo_get_oldest();
-			int64_t timestamp_us = (int64_t)oldest->chunk->timestamp.sec * 1000000LL + (int64_t)oldest->chunk->timestamp.usec;
+			wire_chunk_tailq_t *oldest;
+			int64_t timestamp_us;
+
+			wire_chunk_fifo_lock();
+			oldest = wire_chunk_fifo_get_oldest();
+			timestamp_us = (int64_t)oldest->chunk->timestamp.sec * 1000000LL + (int64_t)oldest->chunk->timestamp.usec;
+			wire_chunk_fifo_unlock();
 
 			if (currentTime_us > (timestamp_us + buffer_us)) {
 				wire_chunk_fifo_remove_oldest();
@@ -259,25 +290,46 @@ void wire_chunk_fifo_remove_oldest_task(void *pvParameters) {
 /**
  *
  */
-void wire_chunk_fifio_notify_register_task(TaskHandle_t handle) {
-	tasksToNotifiy = handle;
-}
+esp_err_t wire_chunk_fifio_register_client(snapclient_t *client) {
+	for (int i=0; i<sizeof(subscribers)/sizeof(subscribers[0]); i++) {
+		if (subscribers[i] == NULL) {
+			subscribers[i] = client;
 
-/**
- *
- */
-void wire_chunk_fifio_notify_unregister_task(TaskHandle_t handle) {
-	if (handle) {
-		tasksToNotifiy = NULL;
+			return ESP_OK;
+		}
 	}
+
+	return ESP_ERR_NO_MEM;
 }
 
 /**
  *
  */
-void wire_chunk_fifio_notify_new_chnk(void) {
-	if (tasksToNotifiy) {
-		xTaskNotify(tasksToNotifiy, 1, eSetValueWithOverwrite);
+esp_err_t wire_chunk_fifio_unregister_client(snapclient_t *client) {
+	for (int i=0; i<sizeof(subscribers)/sizeof(subscribers[0]); i++) {
+		if (subscribers[i] == client) {
+			subscribers[i] = NULL;
+
+			return ESP_OK;
+		}
+	}
+
+	return ESP_FAIL;
+}
+
+/**
+ *
+ */
+void wire_chunk_fifio_client_info_new_chnk(void) {
+	for (int i=0; i<sizeof(subscribers)/sizeof(subscribers[0]); i++) {
+		if (subscribers[i] != NULL) {
+			message_queue_t msg = {
+				.type = SNAPCAST_MESSAGE_WIRE_CHUNK,
+				.baseMsg = {0},
+			};
+
+			xQueueSend(subscribers[i]->msgQ, &msg, portMAX_DELAY);
+		}
 	}
 }
 
@@ -311,7 +363,8 @@ esp_err_t wire_chunk_fifo_init(size_t mSize, uint32_t buf_ms) {
 	maxSize = mSize;
 	buffer_us = buf_ms * 1000;
 
-	xTaskCreatePinnedToCore(wire_chunk_fifo_remove_oldest_task, "chk_rem_tsk", 2048, NULL, 17, &wire_chunk_fifo_remove_oldest_taskhandle, 1);
+	//xTaskCreatePinnedToCore(wire_chunk_fifo_remove_oldest_task, "chk_rem_tsk", 2048, NULL, 17, &wire_chunk_fifo_remove_oldest_taskhandle, 1);
+	xTaskCreate(wire_chunk_fifo_remove_oldest_task, "chk_rem_tsk", 2048, NULL, 7, &wire_chunk_fifo_remove_oldest_taskhandle);
 
 	init = true;
 

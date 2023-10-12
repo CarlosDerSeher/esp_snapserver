@@ -67,7 +67,7 @@ typedef struct time_message
   tv_t latency;
 } time_message_t;
 
-enum message_type
+typedef enum message_type_e
 {
   SNAPCAST_MESSAGE_BASE = 0,
   SNAPCAST_MESSAGE_CODEC_HEADER = 1,
@@ -79,7 +79,7 @@ enum message_type
 
   SNAPCAST_MESSAGE_FIRST = SNAPCAST_MESSAGE_BASE,
   SNAPCAST_MESSAGE_LAST = SNAPCAST_MESSAGE_STREAM_TAGS
-};
+} message_type_t;
 
 typedef struct snapclient_s snapclient_t;
 typedef struct snapclient_s {
@@ -89,11 +89,17 @@ typedef struct snapclient_s {
     uint8_t volume;
 
     int sock;
-//    struct sockaddr_storage p_source_addr;
+    uint32_t id_counter;
+    QueueHandle_t msgQ;
 
-	snapclient_t *prev;
-	snapclient_t *next;
+//	snapclient_t *prev;
+//	snapclient_t *next;
 } snapclient_t;
+
+typedef struct message_queue_s {
+	message_type_t type;
+	base_message_t baseMsg;
+} message_queue_t;
 
 void snapserver_init(void);
 

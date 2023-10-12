@@ -37,15 +37,12 @@ static const char *TAG = "snapserver";
 
 static const uint32_t buffer_ms = 758;
 
-
-
-
 #define BASE_MESSAGE_SIZE 26
 #define TIME_MESSAGE_SIZE 8
 
 
 
-static snapclient_t *clientList = NULL;
+//static snapclient_t *clientList = NULL;
 
 /**
  *
@@ -95,36 +92,43 @@ esp_err_t deserialize_base_msg(char *p_data, size_t len, base_message_t *p_baseM
 /**
  *
  */
-snapclient_t *insert_new_client(char *str, const int sock) {//, struct sockaddr_storage *p_source_addr) {
-	snapclient_t *client = clientList;
+esp_err_t free_client(snapclient_t *client) {
+	if (client) {
+		if (client->helloMsg) {
+			free(client->helloMsg);
+		}
 
-	if (clientList == NULL) {
+		if (client->msgQ) {
+			vQueueDelete(client->msgQ);
+		}
+
+		free(client);
+	}
+
+	return ESP_OK;
+}
+
+/**
+ *
+ */
+snapclient_t *create_new_client(char *str, const int sock) {//, struct sockaddr_storage *p_source_addr) {
+	snapclient_t *client = (snapclient_t *)malloc(sizeof(snapclient_t));
+
+	if (!client) {
+		ESP_LOGE(TAG, "couldn't alloc new client");
+
 		return NULL;
 	}
-
-	// TODO: first check if we got the client already
-
-	// find next empty slot
-	while(client->next != NULL) {
-		client = client->next;
-	}
-	// allocate new client
-	client->next = (snapclient_t *)malloc(sizeof(snapclient_t));
-	if (client->next == NULL) {
-		return NULL;
-	}
-	client->next->prev = client;
-	client->next->next = NULL;
 
 	// now switch to new client and add data
-	client = client->next;
 	client->helloMsg = cJSON_Parse(str);
 	client->latency = 0;
 	client->muted = false;
 	client->volume = 100;
 
 	client->sock = sock;
-//	memcpy(&client->p_source_addr, p_source_addr, sizeof(struct sockaddr_storage));
+	client->id_counter = 0;
+	client->msgQ = xQueueCreate(5, sizeof(message_queue_t));
 
 	char *rendered = cJSON_Print(client->helloMsg);
 	ESP_LOGI(TAG, "JSON read:");
@@ -134,6 +138,46 @@ snapclient_t *insert_new_client(char *str, const int sock) {//, struct sockaddr_
 	// TODO: JSON sanity checking
 
 	return client;
+
+
+//	snapclient_t *client = clientList;
+//
+//	if (clientList == NULL) {
+//		return NULL;
+//	}
+//
+//	// TODO: first check if we got the client already
+//
+//	// find next empty slot
+//	while(client->next != NULL) {
+//		client = client->next;
+//	}
+//	// allocate new client
+//	client->next = (snapclient_t *)malloc(sizeof(snapclient_t));
+//	if (client->next == NULL) {
+//		return NULL;
+//	}
+//	client->next->prev = client;
+//	client->next->next = NULL;
+//
+//	// now switch to new client and add data
+//	client = client->next;
+//	client->helloMsg = cJSON_Parse(str);
+//	client->latency = 0;
+//	client->muted = false;
+//	client->volume = 100;
+//
+//	client->sock = sock;
+//	client->id_counter = 0;
+//
+//	char *rendered = cJSON_Print(client->helloMsg);
+//	ESP_LOGI(TAG, "JSON read:");
+//	ESP_LOGI(TAG, "%s", rendered);
+//	cJSON_free(rendered);
+//
+//	// TODO: JSON sanity checking
+//
+//	return client;
 }
 
 /**
@@ -193,13 +237,13 @@ int time_message_deserialize(time_message_t *msg, const char *data,
 /**
  *
  */
-void send_server_settings(snapclient_t *client) {
+void send_server_settings(snapclient_t *client, base_message_t *bMsgRx) {
 	cJSON *root;
 	char *rendered;
 	base_message_t baseMsg = {
 			  .type = SNAPCAST_MESSAGE_SERVER_SETTINGS,
-			  .id = 1,
-			  .refersTo = 0,
+			  .id = client->id_counter++,
+			  .refersTo = bMsgRx->id,
 			  .sent = {
 			    .sec = esp_timer_get_time()/1000000,
 			    .usec = esp_timer_get_time()%1000000,
@@ -260,12 +304,12 @@ void send_server_settings(snapclient_t *client) {
 /**
  *
  */
-esp_err_t send_codec_header(int sock) {
+esp_err_t send_codec_header(snapclient_t *client, base_message_t *bMsgRx) {
 	esp_err_t err;
 	base_message_t baseMsg = {
 			  .type = SNAPCAST_MESSAGE_CODEC_HEADER,
-			  .id = 2,
-			  .refersTo = 0,
+			  .id = client->id_counter++,
+			  .refersTo = bMsgRx->id,
 			  .sent = {
 			    .sec = esp_timer_get_time()/1000000,
 			    .usec = esp_timer_get_time()%1000000,
@@ -317,7 +361,7 @@ esp_err_t send_codec_header(int sock) {
 	int to_write = BASE_MESSAGE_SIZE + baseMsg.size;
 	int len = BASE_MESSAGE_SIZE + baseMsg.size;
 	while (to_write > 0) {
-		int written = send(sock, tmp + (len - to_write), to_write, 0);
+		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
 		if (written < 0) {
 			ESP_LOGE(TAG, "Error occurred during sending codec header: %s", strerror(errno));
 
@@ -338,11 +382,11 @@ esp_err_t send_codec_header(int sock) {
 /**
  *
  */
-void send_time_message(snapclient_t *client, time_message_t *msg) {
+esp_err_t send_time_message(snapclient_t *client, time_message_t *msg, base_message_t *bMsgRx) {
 	base_message_t baseMsg = {
 			  .type = SNAPCAST_MESSAGE_TIME,
-			  .id = 2,
-			  .refersTo = 0,
+			  .id = client->id_counter++,
+			  .refersTo = bMsgRx->id,
 			  .sent = {
 			    .sec = esp_timer_get_time()/1000000,
 			    .usec = esp_timer_get_time()%1000000,
@@ -360,6 +404,11 @@ void send_time_message(snapclient_t *client, time_message_t *msg) {
 	base_message_serialize(&baseMsg, baseMsg_serialized, BASE_MESSAGE_SIZE);
 
 	char *tmp = (char *)malloc(BASE_MESSAGE_SIZE + baseMsg.size);
+	if (!tmp) {
+		ESP_LOGE(TAG, "couldn't malloc buffer for time message");
+
+		return ESP_FAIL;
+	}
 
 	memcpy(&tmp[0], baseMsg_serialized, BASE_MESSAGE_SIZE);
 	memcpy(&tmp[BASE_MESSAGE_SIZE], &(msg->latency), sizeof(msg->latency));
@@ -382,16 +431,23 @@ void send_time_message(snapclient_t *client, time_message_t *msg) {
 
 	if (errno == 0) {
 		ESP_LOGD(TAG, "time message sent");
+
+		return ESP_OK;
+	}
+	else {
+		ESP_LOGE(TAG, "time message not sent");
+
+		return ESP_FAIL;
 	}
 }
 
 /**
  *
  */
-esp_err_t send_wire_chunk(int sock, wire_chunk_message_t *msg) {
+esp_err_t send_wire_chunk(snapclient_t *client, wire_chunk_message_t *msg) {
 	base_message_t baseMsg = {
 			  .type = SNAPCAST_MESSAGE_WIRE_CHUNK,
-			  .id = 0,
+			  .id = client->id_counter++,
 			  .refersTo = 0,
 			  .sent = {
 			    .sec = esp_timer_get_time()/1000000,
@@ -423,7 +479,7 @@ esp_err_t send_wire_chunk(int sock, wire_chunk_message_t *msg) {
 	int to_write = BASE_MESSAGE_SIZE + baseMsg.size;
 	int len = BASE_MESSAGE_SIZE + baseMsg.size;
 	while (to_write > 0) {
-		int written = send(sock, tmp + (len - to_write), to_write, 0);
+		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
 		if (written < 0) {
 			ESP_LOGE(TAG, "Error (%d) occurred during sending wire chunk: %s", errno, strerror(errno));
 
@@ -446,63 +502,72 @@ esp_err_t send_wire_chunk(int sock, wire_chunk_message_t *msg) {
 /**
  *
  */
-void send_new_wire_chunk( void* event_handler_arg,
-						  esp_event_base_t event_base,
-						  int32_t event_id,
-						  void* event_data)
+void send_initial_wire_chunks_all(snapclient_t *client)
 {
-	int *sock = (int *)event_handler_arg;
-	wire_chunk_tailq_t *element = wire_chunk_fifo_get_newest();
-	wire_chunk_message_t *newChnk = element->chunk;
+	wire_chunk_tailq_t *element;
 
-	send_wire_chunk(*sock, newChnk);
+	wire_chunk_fifo_lock();
 
-//	ESP_LOGI(TAG, "sent next chunk");
+	element = wire_chunk_fifo_get_oldest();
+	while (element) {
+		wire_chunk_message_t *newChnk = element->chunk;
+
+		send_wire_chunk(client, newChnk);
+
+		element = wire_chunk_fifo_get_next(element);
+	}
+
+	wire_chunk_fifo_unlock();
 }
 
 void send_new_wire_chunk_task( void *pvParameter)
 {
-	int sock = *((int *)pvParameter);
-	esp_err_t err;
-	TaskHandle_t handle = xTaskGetCurrentTaskHandle();
+//	int sock = *((int *)pvParameter);
+	snapclient_t *client = (snapclient_t *)pvParameter;
+	esp_err_t err = ESP_OK;
+//	TaskHandle_t handle = xTaskGetCurrentTaskHandle();
 
-	wire_chunk_fifio_notify_register_task(handle);
+	ESP_LOGI(TAG, "started %s (%d)", __func__, client->sock);
+
+	send_initial_wire_chunks_all(client);
+
+	wire_chunk_fifio_register_client(client);
 
 	do {
 		wire_chunk_tailq_t *element;
 		wire_chunk_message_t *newChnk;
-		uint32_t val;
+//		uint32_t val;
+		message_queue_t msg;
 
-		xTaskNotifyWait(0, 0, &val, portMAX_DELAY);
+		xQueueReceive(client->msgQ, &msg, portMAX_DELAY);
 
-		element = wire_chunk_fifo_get_newest();
-		newChnk = element->chunk;
+		if (msg.type == SNAPCAST_MESSAGE_WIRE_CHUNK)
+		{
+			wire_chunk_fifo_lock();
+			element = wire_chunk_fifo_get_newest();
+			if (element) {
+				newChnk = element->chunk;
+				err = send_wire_chunk(client, newChnk);
+			}
+			wire_chunk_fifo_unlock();
+		}
+		else if (msg.type == SNAPCAST_MESSAGE_TIME) {
+			time_message_t timeMsg;
 
-		err = send_wire_chunk(sock, newChnk);
+			// got time message
+			// calculate latency and send back
+			timeMsg.latency.sec = msg.baseMsg.received.sec - msg.baseMsg.sent.sec;
+			timeMsg.latency.usec = msg.baseMsg.received.usec - msg.baseMsg.sent.usec;
+
+			send_time_message(client, &timeMsg, &msg.baseMsg);
+		}
 	} while(err == ESP_OK);
 //	ESP_LOGI(TAG, "sent next chunk");
 
-	wire_chunk_fifio_notify_unregister_task(handle);
+	wire_chunk_fifio_unregister_client(client);
 
 	vTaskDelete(NULL);
 }
-
-/**
- *
- */
-void send_initial_wire_chunks_all( int sock )
-{
-	wire_chunk_tailq_t *element = wire_chunk_fifo_get_oldest();
-
-	while (element) {
-		wire_chunk_message_t *newChnk = element->chunk;
-
-		send_wire_chunk(sock, newChnk);
-
-		element = wire_chunk_fifo_get_next(element);
-	}
-}
-
 
 /**
  *
@@ -512,8 +577,12 @@ static void handle_client_task(void *pvParameters)
 	int len;
     size_t size;
     uint32_t state = 0;
-    snapclient_t *newClient = NULL;
+    snapclient_t *client = NULL;
     int sock = (*(int *)pvParameters);
+    char *tName = pcTaskGetName(xTaskGetCurrentTaskHandle() );
+    TaskHandle_t client_tx_task_handle;
+
+    ESP_LOGI(TAG, "Task %s started", tName);
 
     do {
     	char baseMsgBuffer[BASE_MESSAGE_SIZE];
@@ -538,7 +607,6 @@ static void handle_client_task(void *pvParameters)
 
             size = baseMessage.size;
 //            ESP_LOGI(TAG, "base message size %d", size);
-            //typedMsgBuffer = (char *)malloc(size);
             typedMsgBuffer = (char *)heap_caps_malloc(size, MALLOC_CAP_8BIT);
             if (typedMsgBuffer) {
 				len = recv(sock, typedMsgBuffer, size, 0);
@@ -553,38 +621,49 @@ static void handle_client_task(void *pvParameters)
 
 					break;
 				} else {
-//					ESP_LOGD(TAG, "Received %d bytes from socket %d", len, sock);
+					ESP_LOGD(TAG, "Received (typed msg) %d bytes from socket %d", len, sock);
 
-					if (state == 0) {
-						hello_message_t helloMessage;
-						char *tmp = typedMsgBuffer;
+					switch (baseMessage.type) {
+						case SNAPCAST_MESSAGE_HELLO:
+						{
+							hello_message_t helloMessage;
+							char *tmp = typedMsgBuffer;
 
-						char *str = deserialize_hello_msg(tmp, size, &helloMessage);
-						newClient = insert_new_client(str, sock);
+							char *str = deserialize_hello_msg(tmp, size, &helloMessage);
+							client = create_new_client(str, sock);
 
-						send_server_settings(newClient);
-						send_codec_header(sock);
-						send_initial_wire_chunks_all(sock);
+							ESP_LOGD(TAG, "hello message received");
 
-						//wire_chunk_fifo_register_handler(send_new_wire_chunk, &sock);
-				        char tName[32];
-				        sprintf(tName, "nWcT_%d", sock);
-						xTaskCreate(send_new_wire_chunk_task, (const char *)tName, 2048, (void*)&sock, 8, NULL);
+							send_server_settings(client, &baseMessage);
+							send_codec_header(client, &baseMessage);
 
-						state = 1;
-					}
-					else if (state == 1) {
-						if (baseMessage.type == SNAPCAST_MESSAGE_TIME) {
-							time_message_t msg;
+					        char tName[32];
+					        sprintf(tName, "nWcT_%d", sock);
+					        xTaskCreatePinnedToCore(send_new_wire_chunk_task, (const char *)tName, 2048, (void*)client, 10, &client_tx_task_handle, tskNO_AFFINITY);
+
+							break;
+						}
+
+						case SNAPCAST_MESSAGE_TIME:
+						{
+							message_queue_t msg;
 
 							// got time message
-							// calculate latency and send back
-							msg.latency.sec = baseMessage.received.sec - baseMessage.sent.sec;
-							msg.latency.usec = baseMessage.received.usec - baseMessage.sent.usec;
-
 							ESP_LOGD(TAG, "time message received");
 
-							send_time_message(newClient, &msg);
+							// pass on to tx task to issue response
+							msg.type = SNAPCAST_MESSAGE_TIME;
+							memcpy(&msg.baseMsg, &baseMessage, sizeof(baseMessage));
+							xQueueSend(client->msgQ, &msg, portMAX_DELAY);
+
+							break;
+						}
+
+						default:
+						{
+							ESP_LOGI(TAG, "message received %d", baseMessage.type);
+
+							break;
 						}
 					}
 				}
@@ -600,9 +679,19 @@ static void handle_client_task(void *pvParameters)
     shutdown(sock, 0);
     close(sock);
 
+    // wait for task to be deleted by itself
+    while (eTaskStateGet(client_tx_task_handle) != eDeleted) {
+    	vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
+    free_client(client);
+
     vTaskDelete(NULL);
 }
 
+/**
+ *
+ */
 static void snapserver_task(void *pvParameters)
 {
     char addr_str[128];
@@ -614,14 +703,14 @@ static void snapserver_task(void *pvParameters)
     int keepCount = KEEPALIVE_COUNT;
     struct sockaddr_storage dest_addr;
 
-	clientList = (snapclient_t *)malloc(sizeof(snapclient_t));
-	if (!clientList) {
-		ESP_LOGE(TAG, "can't alloc memory for clientList");
-
-		return;
-	}
-	clientList->prev = NULL;
-	clientList->next = NULL;
+//	clientList = (snapclient_t *)malloc(sizeof(snapclient_t));
+//	if (!clientList) {
+//		ESP_LOGE(TAG, "can't alloc memory for clientList");
+//
+//		return;
+//	}
+//	clientList->prev = NULL;
+//	clientList->next = NULL;
 
     if (addr_family == AF_INET) {
         struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
@@ -703,7 +792,7 @@ static void snapserver_task(void *pvParameters)
 
         char tName[32];
         sprintf(tName, "cTsk_%d", sock);
-        xTaskCreate(handle_client_task, (const char *)tName, 4096, (void*)&sock, 8, NULL);
+        xTaskCreatePinnedToCore(handle_client_task, (const char *)tName, 4096, (void*)&sock, 10, NULL, tskNO_AFFINITY);
     }
 
 CLEAN_UP:
@@ -713,10 +802,5 @@ CLEAN_UP:
 
 void snapserver_init(void)
 {
-#ifdef CONFIG_SNAPSERVER_IPV4
-    xTaskCreate(snapserver_task, "snpsrv_tsk", 4096, (void*)AF_INET, 5, NULL);
-#endif
-#ifdef CONFIG_SNAPSERVER_IPV6
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, (void*)AF_INET6, 5, NULL);
-#endif
+    xTaskCreatePinnedToCore(snapserver_task, "snpsrv_tsk", 4096, (void*)AF_INET, 5, NULL, 1);
 }

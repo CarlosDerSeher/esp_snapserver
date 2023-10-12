@@ -2,8 +2,11 @@
 
 This is a HIGHLY unstable [snapcast server](https://github.com/badaix/snapcast) implementation for ESP32.
 It is in a very early stage and more of a proof of concept and possiblity study of myself. I am very
-surprised by the result though as this little thig called ESP32 is very much capable of doing all that's needed
-to get audio playback through [esp_snapclient](https://github.com/CarlosDerSeher/snapclient). It does loads of stuff currently:
+surprised and pleased by the result though, as this little thig called ESP32 is very much capable of doing all that's needed
+to get audio playback through [esp_snapclient](https://github.com/CarlosDerSeher/snapclient) or even regular 
+[snapclient](https://github.com/badaix/snapcast). 
+
+It does loads of stuff currently:
 
 * DLNA audio (LPCM) input (Android App AirMusic) 
 
@@ -12,19 +15,23 @@ to get audio playback through [esp_snapclient](https://github.com/CarlosDerSeher
 * snapserver <--> snapclient communication / protocol handling
 * stream to 1 connected esp_snapclient
 
+What it can't do
+* Snapcast control interface isn't implemented yet, so things like volume control and the like won't work.
+
 As stated before it is in a very early stage of development and if not started in the right order it will most certainly crash:
 
 * start esp_snapserver (wait until ready)
 * connect dlna and start playback 
-* start esp_snapclient
-* (never disconnect dlna from now on :)
+* start connecting snapclient(s)
+* never disconnect anything from now on or it will crash :)
 
-I only tested with 1 esp_snapclient at the moment as I only have 2 boards at hand at the time of writing. 
-Using Ubuntu client makes the server crash, a thing which needs debugging.
+I tested with 1 esp_snapclient and 2 regular snapclients started on my ubuntu machine.
 
-DLNA part is also very buggy and needs a lot of work. I am very unhappy with ADF implementation and I would like
+DLNA part is very buggy and needs a lot of work. I am very unhappy with ADF implementation and I would like
 to use another one but couldn't find anything that wouldn't require a lot effort to port to ESP32. I'd appreciate
 suggestions on this one.
+
+Client disconnects also make the server unstable at the moment, I'll look into it.
 
 ## How to build and flash
 Get ESP ADF:
@@ -56,8 +63,10 @@ Now get this repository, build and flash
 ```
 git clone --recurse-submodules https://github.com/CarlosDerSeher/esp_snapserver.git
 cd esp_snapserver
+idf.py menuconfig	# you'll probably want to adjust the port in "snapserver Configuration"
 idf.py build flash monitor
 ```
 
-At last build a [esp_snapclient](https://github.com/CarlosDerSeher/snapclient) and listen to some music.
+At last build a [esp_snapclient](https://github.com/CarlosDerSeher/snapclient) or install [snapclient](https://github.com/badaix/snapcast)
+and listen to some music.
 
