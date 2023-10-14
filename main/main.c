@@ -154,6 +154,8 @@ esp_err_t get_codec_header(flac_codec_header_t **p_cHeader) {
 	if ((flac_codecHeader.payload == NULL) || (flac_codecHeader.size == 0)) {
 		*p_cHeader = NULL;
 
+		ESP_LOGE(TAG, "%s: couldn't get header", __func__);
+
 		return ESP_ERR_NOT_FOUND;
 	}
 	else {
@@ -180,11 +182,11 @@ FLAC__StreamEncoderWriteStatus write_callback(const FLAC__StreamEncoder* encoder
 		codecHeaderCounter += bytes;
 
 		if (flac_codecHeader.payload == NULL) {
-			flac_codecHeader.payload = (char *)malloc(codecHeaderCounter);
+			flac_codecHeader.payload = (char *)heap_caps_malloc(codecHeaderCounter, MALLOC_CAP_8BIT);
 			memcpy(flac_codecHeader.payload, buffer, bytes);
 		}
 		else {
-			newHeader = (char *)malloc(codecHeaderCounter);
+			newHeader = (char *)heap_caps_malloc(codecHeaderCounter, MALLOC_CAP_8BIT);
 			memcpy(&newHeader[0], flac_codecHeader.payload, prevHeaderCounter);
 			free(flac_codecHeader.payload);
 			flac_codecHeader.payload = newHeader;
@@ -200,12 +202,12 @@ FLAC__StreamEncoderWriteStatus write_callback(const FLAC__StreamEncoder* encoder
 	else {
 		wire_chunk_message_t *newChnk;
 
-		newChnk = (wire_chunk_message_t *)malloc(sizeof(wire_chunk_message_t));
+		newChnk = (wire_chunk_message_t *)heap_caps_malloc(sizeof(wire_chunk_message_t), MALLOC_CAP_8BIT);
 		newChnk->size = bytes;
-		newChnk->payload = (char *)malloc(bytes);
+		newChnk->payload = (char *)heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
 		memcpy(newChnk->payload, buffer, bytes);
 
-		wire_chunk_tailq_t *newElement = (wire_chunk_tailq_t *)malloc( sizeof(wire_chunk_tailq_t) );
+		wire_chunk_tailq_t *newElement = (wire_chunk_tailq_t *)heap_caps_malloc(sizeof(wire_chunk_tailq_t), MALLOC_CAP_8BIT);
 		newElement->chunk = newChnk;
 
 		if (wire_chunk_fifo_empty() == true) {
@@ -266,9 +268,9 @@ static void flac_encoder_task(void *pvParameters) {
 		return;
 	}
 
-	ESP_LOGW(TAG, "frames: %ld", FLAC__stream_encoder_get_blocksize(encoder));
+//	ESP_LOGW(TAG, "frames: %ld", FLAC__stream_encoder_get_blocksize(encoder));
 
-	uint32_t rounds = 0;
+//	uint32_t rounds = 0;
 
 //	ringbuf_handle_t rb = audio_element_get_input_ringbuf(raw_stream_reader);
 //	ESP_LOGI(TAG, "got rb %p handle", rb);
@@ -562,12 +564,21 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
 //                esp_dlna_notify(dlna, "AVTransport");
 //            }
 
+
+            audio_pipeline_stop(pipeline);
             audio_pipeline_wait_for_stop(pipeline);
+
+            flac_encoder_deinit();
+
+            audio_pipeline_reset_ringbuffer(pipeline);
             audio_element_info_t info;
             audio_element_getinfo(http_stream_reader, &info);
             info.uri = track_uri;
             audio_element_setinfo(http_stream_reader, &info);
             audio_pipeline_run(pipeline);
+            audio_pipeline_resume(pipeline);
+
+            flac_encoder_init();
 
             esp_dlna_notify(dlna, "AVTransport");
             trans_state = "PLAYING";
@@ -577,9 +588,13 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
             ESP_LOGI(TAG, "Stop instance=%s", buffer);
 //            esp_audio_stop(player, TERMINATION_TYPE_NOW);
 
-            audio_pipeline_pause(pipeline);
-            audio_pipeline_reset_elements(pipeline);
+            //audio_pipeline_pause(pipeline);
+            audio_pipeline_stop(pipeline);
+            audio_pipeline_wait_for_stop(pipeline);
+//            audio_pipeline_reset_elements(pipeline);
             audio_pipeline_reset_ringbuffer(pipeline);
+
+//            flac_encoder_init();
 
             trans_state = "STOPPED";
             esp_dlna_notify_avt_by_action(dlna_handle, "TransportState");
@@ -606,7 +621,7 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
         case AVT_SET_TRACK_URI:
             ESP_LOGI(TAG, "SetAVTransportURI=%s", buffer);
 
-            flac_encoder_init();
+//            flac_encoder_init();
 
 //            esp_audio_state_t state = { 0 };
 //            esp_audio_state_get(player, &state);
@@ -725,6 +740,9 @@ static void audio_player_init(void)
     ESP_LOGI(TAG, "[4.1] Listening event from all elements of pipeline");
     audio_pipeline_set_listener(pipeline, evt);
 
+//    audio_pipeline_run(pipeline);
+//    audio_pipeline_stop(pipeline);
+//    audio_pipeline_wait_for_stop(pipeline);
 
 //    audio_decoder_t auto_decode[] = {
 //        DEFAULT_ESP_MP3_DECODER_CONFIG(),
@@ -820,8 +838,6 @@ void flac_encoder_deinit(void)  {
 		flac_encoder_task_handle = NULL;
 	}
 
-	codecHeaderCounter = 0;
-
 	if (flac_codecHeader.payload) {
 		free(flac_codecHeader.payload);
 		flac_codecHeader.payload = NULL;
@@ -847,6 +863,8 @@ void flac_encoder_deinit(void)  {
 	}
 
 	wire_chunk_fifo_clear();
+
+	codecHeaderCounter = 0;
 }
 
 /**
@@ -1047,12 +1065,6 @@ void app_main()
 //    xTaskCreatePinnedToCore(tcp_server_rx_task, "tcp_rx", 4096, (void*)AF_INET, 5, NULL, tskNO_AFFINITY);
 //    xTaskCreatePinnedToCore(tcp_server_tx_task, "tcp_tx", 4096, (void*)AF_INET, 5, NULL, tskNO_AFFINITY);
 //#endif
-
-    int16_t a = 0;
-    int16_t b = 0;
-    uint16_t c = 0;
-    ESP_LOGE(TAG, "Sizes: %hd, %hi, %hu", a,b,c);
-    ESP_LOGE(TAG, "Sizes: %u, %u, %u, %u", sizeof(void *), sizeof(long), sizeof(size_t), sizeof(ssize_t));
 
     while(1) {
         audio_event_iface_msg_t msg;

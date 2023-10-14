@@ -112,7 +112,7 @@ esp_err_t free_client(snapclient_t *client) {
  *
  */
 snapclient_t *create_new_client(char *str, const int sock) {//, struct sockaddr_storage *p_source_addr) {
-	snapclient_t *client = (snapclient_t *)malloc(sizeof(snapclient_t));
+	snapclient_t *client = (snapclient_t *)heap_caps_malloc(sizeof(snapclient_t), MALLOC_CAP_8BIT);
 
 	if (!client) {
 		ESP_LOGE(TAG, "couldn't alloc new client");
@@ -271,7 +271,7 @@ void send_server_settings(snapclient_t *client, base_message_t *bMsgRx) {
 
 	base_message_serialize(&baseMsg, baseMsg_serialized, BASE_MESSAGE_SIZE);
 
-	char *tmp = (char *)malloc(BASE_MESSAGE_SIZE + baseMsg.size);
+	char *tmp = (char *)heap_caps_malloc(BASE_MESSAGE_SIZE + baseMsg.size, MALLOC_CAP_8BIT);
 
 	memcpy(&tmp[0], baseMsg_serialized, BASE_MESSAGE_SIZE);
 	uint32_t msgLength = strlen(rendered);
@@ -330,7 +330,7 @@ esp_err_t send_codec_header(snapclient_t *client, base_message_t *bMsgRx) {
 		return err;
 	}
 
-	codec_header_msg.codec = (char *)malloc(strlen(currentCodec) + 1);
+	codec_header_msg.codec = (char *)heap_caps_malloc(strlen(currentCodec) + 1, MALLOC_CAP_8BIT);
 	strcpy(codec_header_msg.codec, currentCodec);
 	codec_header_msg.codec_size = strlen(codec_header_msg.codec);
 	codec_header_msg.payload = flac_codecHeader->payload;
@@ -341,7 +341,7 @@ esp_err_t send_codec_header(snapclient_t *client, base_message_t *bMsgRx) {
 
 	base_message_serialize(&baseMsg, baseMsg_serialized, BASE_MESSAGE_SIZE);
 
-	char *tmp = (char *)malloc(BASE_MESSAGE_SIZE + baseMsg.size);
+	char *tmp = (char *)heap_caps_malloc(BASE_MESSAGE_SIZE + baseMsg.size, MALLOC_CAP_8BIT);
 
 	size_t offset = 0;
 	memcpy(&tmp[offset], baseMsg_serialized, BASE_MESSAGE_SIZE);
@@ -403,7 +403,7 @@ esp_err_t send_time_message(snapclient_t *client, time_message_t *msg, base_mess
 
 	base_message_serialize(&baseMsg, baseMsg_serialized, BASE_MESSAGE_SIZE);
 
-	char *tmp = (char *)malloc(BASE_MESSAGE_SIZE + baseMsg.size);
+	char *tmp = (char *)heap_caps_malloc(BASE_MESSAGE_SIZE + baseMsg.size, MALLOC_CAP_8BIT);
 	if (!tmp) {
 		ESP_LOGE(TAG, "couldn't malloc buffer for time message");
 
@@ -463,7 +463,7 @@ esp_err_t send_wire_chunk(snapclient_t *client, wire_chunk_message_t *msg) {
 
 	baseMsg.size = sizeof(msg->timestamp) + sizeof(msg->size) + msg->size;
 
-	char *tmp = (char *)malloc(BASE_MESSAGE_SIZE + baseMsg.size);
+	char *tmp = (char *)heap_caps_malloc(BASE_MESSAGE_SIZE + baseMsg.size, MALLOC_CAP_8BIT);
 
 	base_message_serialize(&baseMsg, tmp, BASE_MESSAGE_SIZE);
 
@@ -526,8 +526,12 @@ void send_new_wire_chunk_task( void *pvParameter)
 	snapclient_t *client = (snapclient_t *)pvParameter;
 	esp_err_t err = ESP_OK;
 //	TaskHandle_t handle = xTaskGetCurrentTaskHandle();
+//	TaskStatus_t taskDetails;
 
-	ESP_LOGI(TAG, "started %s (%d)", __func__, client->sock);
+	// Use the handle to obtain further information about the task.
+//	vTaskGetInfo( handle, &taskDetails, pdTRUE,  eInvalid );
+
+//	ESP_LOGI(TAG, "started: %s, sock %d", taskDetails.pcTaskName, client->sock);
 
 	send_initial_wire_chunks_all(client);
 
@@ -550,6 +554,8 @@ void send_new_wire_chunk_task( void *pvParameter)
 				err = send_wire_chunk(client, newChnk);
 			}
 			wire_chunk_fifo_unlock();
+
+			ESP_LOGI(TAG, "sent wire chunk from task %d", client->sock);
 		}
 		else if (msg.type == SNAPCAST_MESSAGE_TIME) {
 			time_message_t timeMsg;
@@ -567,6 +573,45 @@ void send_new_wire_chunk_task( void *pvParameter)
 	wire_chunk_fifio_unregister_client(client);
 
 	vTaskDelete(NULL);
+}
+
+
+/**
+ * @brief Tries to receive data from specified sockets in a non-blocking way,
+ *        i.e. returns immediately if no data.
+ *
+ * @param[in] tag Logging tag
+ * @param[in] sock Socket for reception
+ * @param[out] data Data pointer to write the received data
+ * @param[in] max_len Maximum size of the allocated space for receiving data
+ * @return
+ *          >0 : Size of received data
+ *          =0 : No data available
+ *          -1 : Error occurred during socket read operation
+ *          -2 : Socket is not connected, to distinguish between an actual socket error and active disconnection
+ */
+static int try_receive(const char *tag, const int sock, char * data, size_t max_len)
+{
+	int rxLen = 0;
+
+	do {
+		int len = recv(sock, &data[rxLen], max_len - rxLen, 0);
+		if (len < 0) {
+			if (errno == EINPROGRESS || errno == EAGAIN || errno == EWOULDBLOCK) {
+				return 0;   // Not an error
+			}
+			if (errno == ENOTCONN) {
+				ESP_LOGW(tag, "[sock=%d]: Connection closed", sock);
+				return -2;  // Socket has been disconnected
+			}
+			ESP_LOGE(TAG, "Error occurred during receiving");
+			return -1;
+		}
+
+		rxLen += len;
+	} while(rxLen < max_len);
+
+    return rxLen;
 }
 
 /**
@@ -671,7 +716,7 @@ static void handle_client_task(void *pvParameters)
 				free(typedMsgBuffer);
             }
             else {
-            	ESP_LOGE(TAG, "can't alloc memory for typed message");
+            	ESP_LOGE(TAG, "can't alloc memory (%d bytes) for typed message %d", size, baseMessage.type);
             }
         }
     } while (len > 0);
@@ -685,6 +730,11 @@ static void handle_client_task(void *pvParameters)
     }
 
     free_client(client);
+
+	ESP_LOGW(TAG, "internal free %d, block %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+									            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+	ESP_LOGW(TAG, "external free %d, block %d", heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+												heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
     vTaskDelete(NULL);
 }
@@ -736,7 +786,7 @@ static void snapserver_task(void *pvParameters)
         return;
     }
     int opt = 1;
-    int timeout = 1000;
+//    int timeout = 1000;
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 //    setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
 //    setsockopt(listen_sock, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
@@ -745,6 +795,14 @@ static void snapserver_task(void *pvParameters)
     // if both protocols used at the same time (used in CI)
     setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
 #endif
+
+//    // Marking the socket as non-blocking
+//    int flags = fcntl(listen_sock, F_GETFL);
+//    if (fcntl(listen_sock, F_SETFL, flags | O_NONBLOCK) == -1) {
+//        ESP_LOGE(TAG, "Unable to set socket non blocking");
+//        return;
+//    }
+//    ESP_LOGI(TAG, "Socket marked as non blocking");
 
     ESP_LOGI(TAG, "Socket created");
 
@@ -789,10 +847,18 @@ static void snapserver_task(void *pvParameters)
 #endif
         ESP_LOGI(TAG, "Socket accepted (%d) ip address: %s", sock, addr_str);
 
-
+    	ESP_LOGW(TAG, "internal free %d, block %d", heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+    									            heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    	ESP_LOGW(TAG, "external free %d, block %d", heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+													heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         char tName[32];
         sprintf(tName, "cTsk_%d", sock);
-        xTaskCreatePinnedToCore(handle_client_task, (const char *)tName, 4096, (void*)&sock, 10, NULL, tskNO_AFFINITY);
+        if (xTaskCreatePinnedToCore(handle_client_task, (const char *)tName, 4096, (void*)&sock, 10, NULL, tskNO_AFFINITY) != pdPASS) {
+        	ESP_LOGE(TAG, "Task %s couldn't be created", tName);
+
+            shutdown(sock, 0);
+            close(sock);
+        }
     }
 
 CLEAN_UP:
