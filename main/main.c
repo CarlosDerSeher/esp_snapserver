@@ -576,9 +576,12 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
             info.uri = track_uri;
             audio_element_setinfo(http_stream_reader, &info);
             audio_pipeline_run(pipeline);
-            audio_pipeline_resume(pipeline);
 
             flac_encoder_init();
+
+            audio_pipeline_resume(pipeline);
+
+
 
             esp_dlna_notify(dlna, "AVTransport");
             trans_state = "PLAYING";
