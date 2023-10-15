@@ -317,12 +317,16 @@ static int socket_send(const char *tag, const int sock, const char * data, const
         }
         else if ((written < 0) && (errno == EAGAIN)) {
         	count++;
-        	if (count > 50) {
+        	if (count > 100) {	// TODO: find a more clever and robust solution to this!!!
         		return -1;
         	}
+
+        	ESP_LOGI(TAG, "%d %d", written, errno);
+
+        	vTaskDelay(pdMS_TO_TICKS(1));
         }
 
-        ESP_LOGI(TAG, "%d %d", written, errno);
+//        ESP_LOGI(TAG, "%d %d", written, errno);
         if (written > 0) {
         	to_write -= written;
         }
@@ -613,22 +617,25 @@ esp_err_t send_wire_chunk(snapclient_t *client, wire_chunk_message_t *msg) {
 /**
  *
  */
-void send_initial_wire_chunks_all(snapclient_t *client)
+esp_err_t send_initial_wire_chunks_all(snapclient_t *client)
 {
 	wire_chunk_tailq_t *element;
+	esp_err_t err = ESP_OK;
 
 	wire_chunk_fifo_lock();
 
 	element = wire_chunk_fifo_get_oldest();
-	while (element) {
+	while (element && (err != ESP_OK)) {
 		wire_chunk_message_t *newChnk = element->chunk;
 
-		send_wire_chunk(client, newChnk);
+		err = send_wire_chunk(client, newChnk);
 
 		element = wire_chunk_fifo_get_next(element);
 	}
 
 	wire_chunk_fifo_unlock();
+
+	return err;
 }
 
 void send_new_wire_chunk_task( void *pvParameter)
@@ -644,44 +651,48 @@ void send_new_wire_chunk_task( void *pvParameter)
 
 	ESP_LOGI(TAG, "started %s: sock %d", __func__, client->sock);
 
-	send_initial_wire_chunks_all(client);
+	err = send_initial_wire_chunks_all(client);
 
-	wire_chunk_fifio_register_client(client);
+	if (err == ESP_OK) {
+		wire_chunk_fifio_register_client(client);
 
-	do {
-		wire_chunk_tailq_t *element;
-		wire_chunk_message_t *newChnk;
-//		uint32_t val;
-		message_queue_t msg;
+		do {
+			wire_chunk_tailq_t *element;
+			wire_chunk_message_t *newChnk;
+	//		uint32_t val;
+			message_queue_t msg;
 
-		xQueueReceive(client->msgQ, &msg, portMAX_DELAY);
+			xQueueReceive(client->msgQ, &msg, portMAX_DELAY);
 
-		if (msg.type == SNAPCAST_MESSAGE_WIRE_CHUNK)
-		{
-			wire_chunk_fifo_lock();
-			element = wire_chunk_fifo_get_newest();
-			if (element) {
-				newChnk = element->chunk;
-				err = send_wire_chunk(client, newChnk);
+			if (msg.type == SNAPCAST_MESSAGE_WIRE_CHUNK)
+			{
+				wire_chunk_fifo_lock();
+				element = wire_chunk_fifo_get_newest();
+				if (element) {
+					newChnk = element->chunk;
+					err = send_wire_chunk(client, newChnk);
+				}
+				wire_chunk_fifo_unlock();
+
+	//			ESP_LOGI(TAG, "sent wire chunk from task %d", client->sock);
 			}
-			wire_chunk_fifo_unlock();
+			else if (msg.type == SNAPCAST_MESSAGE_TIME) {
+				time_message_t timeMsg;
 
-//			ESP_LOGI(TAG, "sent wire chunk from task %d", client->sock);
-		}
-		else if (msg.type == SNAPCAST_MESSAGE_TIME) {
-			time_message_t timeMsg;
+				// got time message
+				// calculate latency and send back
+				timeMsg.latency.sec = msg.baseMsg.received.sec - msg.baseMsg.sent.sec;
+				timeMsg.latency.usec = msg.baseMsg.received.usec - msg.baseMsg.sent.usec;
 
-			// got time message
-			// calculate latency and send back
-			timeMsg.latency.sec = msg.baseMsg.received.sec - msg.baseMsg.sent.sec;
-			timeMsg.latency.usec = msg.baseMsg.received.usec - msg.baseMsg.sent.usec;
+				err = send_time_message(client, &timeMsg, &msg.baseMsg);
+			}
+		} while(err == ESP_OK);
+		//	ESP_LOGI(TAG, "sent next chunk");
 
-			err = send_time_message(client, &timeMsg, &msg.baseMsg);
-		}
-	} while(err == ESP_OK);
-//	ESP_LOGI(TAG, "sent next chunk");
+		wire_chunk_fifio_unregister_client(client);
+	}
 
-	wire_chunk_fifio_unregister_client(client);
+    shutdown(client->sock, 0);
 
 	vTaskDelete(NULL);
 }
@@ -773,7 +784,9 @@ static void handle_client_task(void *pvParameters)
 								// pass on to tx task to issue response
 								msg.type = SNAPCAST_MESSAGE_TIME;
 								memcpy(&msg.baseMsg, &baseMessage, sizeof(baseMessage));
-								xQueueSend(client->msgQ, &msg, portMAX_DELAY);
+								if (client && client->msgQ) {
+									xQueueSend(client->msgQ, &msg, portMAX_DELAY);
+								}
 
 								break;
 							}
@@ -894,11 +907,11 @@ static void snapserver_task(void *pvParameters)
     }
     ESP_LOGI(TAG, "Socket marked as non blocking");
 
-//    int opt = 1;
+    int opt = 1;
 ////    int timeout = 1000;
-//    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-////    setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
-////    setsockopt(listen_sock, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+//    setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout));
+//    setsockopt(listen_sock, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout));
 //#if defined(CONFIG_SNAPSERVER_IPV4) && defined(CONFIG_SNAPSERVER_IPV6)
 //    // Note that by default IPV6 binds to both protocols, it is must be disabled
 //    // if both protocols used at the same time (used in CI)

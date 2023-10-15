@@ -333,20 +333,39 @@ static void flac_encoder_task(void *pvParameters) {
 //			vTaskDelay(pdMS_TO_TICKS(26));
 	    } else {
 	        //Failed to receive item
-//	    	ESP_LOGE(TAG, "Failed to receive item\n");
+	    	ESP_LOGE(TAG, "Failed to receive item %d", length);
+
+	    	vTaskDelay(pdMS_TO_TICKS(20));
 	    }
 	}
-
-	ok &= FLAC__stream_encoder_finish(encoder);
-
-	ESP_LOGI(TAG, "encoding: %s\n", ok? "succeeded" : "FAILED");
-	ESP_LOGI(TAG, "   state: %s\n", FLAC__StreamEncoderStateString[FLAC__stream_encoder_get_state(encoder)]);
-
-	/* now that encoding is finished, the metadata can be freed */
-	FLAC__metadata_object_delete(metadata[0]);
-	FLAC__metadata_object_delete(metadata[1]);
-
-	FLAC__stream_encoder_delete(encoder);
+//
+//	if (flac_codecHeader.payload) {
+//		free(flac_codecHeader.payload);
+//		flac_codecHeader.payload = NULL;
+//		flac_codecHeader.size = 0;
+//	}
+//
+//	if (encoder) {
+//		FLAC__stream_encoder_finish(encoder);
+//
+//		/* now that encoding is finished, the metadata can be freed */
+//		if (metadata[0]) {
+//			FLAC__metadata_object_delete(metadata[0]);
+//			metadata[0] = NULL;
+//		}
+//		if (metadata[1]) {
+//			FLAC__metadata_object_delete(metadata[1]);
+//			metadata[1] = NULL;
+//		}
+//
+//		FLAC__stream_encoder_delete(encoder);
+//
+//		encoder = NULL;
+//	}
+//
+//	wire_chunk_fifo_clear();
+//
+//	codecHeaderCounter = 0;
 }
 
 //static void tcp_server_tx_task(void *pvParameters) {
@@ -552,36 +571,21 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
         case AVT_PLAY:
             ESP_LOGI(TAG, "Play with speed=%s trans_state %s", buffer, trans_state);
 
-//            esp_audio_state_t state = { 0 };
-//            esp_audio_state_get(player, &state);
-            //if (state.status == AUDIO_STATUS_PAUSED)
-//            {
-//                esp_audio_resume(player);
-//                esp_dlna_notify(dlna, "AVTransport");
-//                break;
-//            } else if (track_uri != NULL) {
-//                esp_audio_play(player, AUDIO_CODEC_TYPE_DECODER, track_uri, 0);
-//                esp_dlna_notify(dlna, "AVTransport");
-//            }
-
+            flac_encoder_deinit();
 
             audio_pipeline_stop(pipeline);
             audio_pipeline_wait_for_stop(pipeline);
-
-            flac_encoder_deinit();
-
+            audio_pipeline_terminate(pipeline);
+			audio_element_info_t info;
+			audio_element_getinfo(http_stream_reader, &info);
+			info.uri = track_uri;
+			audio_element_setinfo(http_stream_reader, &info);
             audio_pipeline_reset_ringbuffer(pipeline);
-            audio_element_info_t info;
-            audio_element_getinfo(http_stream_reader, &info);
-            info.uri = track_uri;
-            audio_element_setinfo(http_stream_reader, &info);
-            audio_pipeline_run(pipeline);
+            audio_pipeline_reset_elements(pipeline);
 
             flac_encoder_init();
 
-            audio_pipeline_resume(pipeline);
-
-
+            audio_pipeline_run(pipeline);
 
             esp_dlna_notify(dlna, "AVTransport");
             trans_state = "PLAYING";
@@ -591,13 +595,11 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
             ESP_LOGI(TAG, "Stop instance=%s", buffer);
 //            esp_audio_stop(player, TERMINATION_TYPE_NOW);
 
-            //audio_pipeline_pause(pipeline);
             audio_pipeline_stop(pipeline);
             audio_pipeline_wait_for_stop(pipeline);
-//            audio_pipeline_reset_elements(pipeline);
-            audio_pipeline_reset_ringbuffer(pipeline);
+            audio_pipeline_terminate(pipeline);
 
-//            flac_encoder_init();
+        	flac_encoder_deinit();
 
             trans_state = "STOPPED";
             esp_dlna_notify_avt_by_action(dlna_handle, "TransportState");
@@ -692,7 +694,12 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
  */
 static int _http_stream_event_handle(http_stream_event_msg_t *msg)
 {
-	if (msg->event_id == HTTP_STREAM_RESOLVE_ALL_TRACKS) {
+//	ESP_LOGW(TAG, "%s: msg->event_id [%d]", __func__, msg->event_id);
+
+	if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
+
+	}
+	else if (msg->event_id == HTTP_STREAM_RESOLVE_ALL_TRACKS) {
         return ESP_OK;
     }
 	else if (msg->event_id == HTTP_STREAM_FINISH_TRACK) {
@@ -1090,6 +1097,11 @@ void app_main()
 
 				audio_element_getinfo(http_stream_reader, &music_info);
 				ESP_LOGI(TAG, "[ * ] Codec format: %d", music_info.codec_fmt);
+        	}
+        	else {
+        		if (msg.source == (void *) http_stream_reader) {
+        			ESP_LOGI(TAG, "unknown event: from http_stream_reader [%d]", msg.cmd);
+        		}
         	}
     	}
     }
