@@ -147,7 +147,12 @@ static esp_err_t wire_chunk_fifo_remove_oldest(void) {
 	xSemaphoreTake(wire_chunk_fifo.mux, portMAX_DELAY);
 
 	element = wire_chunk_fifo_get_oldest();
-	wire_chunk_fifo_delete_element(element);
+	if (element) {
+		wire_chunk_fifo_delete_element(element);
+	}
+	else {
+
+	}
 
 	xSemaphoreGive(wire_chunk_fifo.mux);
 	xSemaphoreGive(wire_chunk_fifo.countSemaphore);

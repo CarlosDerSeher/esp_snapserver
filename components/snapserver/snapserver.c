@@ -40,10 +40,6 @@ static const uint32_t buffer_ms = 758;
 #define BASE_MESSAGE_SIZE 26
 #define TIME_MESSAGE_SIZE 8
 
-
-
-//static snapclient_t *clientList = NULL;
-
 /**
  *
  */
@@ -138,46 +134,6 @@ snapclient_t *create_new_client(char *str, const int sock) {//, struct sockaddr_
 	// TODO: JSON sanity checking
 
 	return client;
-
-
-//	snapclient_t *client = clientList;
-//
-//	if (clientList == NULL) {
-//		return NULL;
-//	}
-//
-//	// TODO: first check if we got the client already
-//
-//	// find next empty slot
-//	while(client->next != NULL) {
-//		client = client->next;
-//	}
-//	// allocate new client
-//	client->next = (snapclient_t *)malloc(sizeof(snapclient_t));
-//	if (client->next == NULL) {
-//		return NULL;
-//	}
-//	client->next->prev = client;
-//	client->next->next = NULL;
-//
-//	// now switch to new client and add data
-//	client = client->next;
-//	client->helloMsg = cJSON_Parse(str);
-//	client->latency = 0;
-//	client->muted = false;
-//	client->volume = 100;
-//
-//	client->sock = sock;
-//	client->id_counter = 0;
-//
-//	char *rendered = cJSON_Print(client->helloMsg);
-//	ESP_LOGI(TAG, "JSON read:");
-//	ESP_LOGI(TAG, "%s", rendered);
-//	cJSON_free(rendered);
-//
-//	// TODO: JSON sanity checking
-//
-//	return client;
 }
 
 /**
@@ -379,19 +335,7 @@ esp_err_t send_server_settings(snapclient_t *client, base_message_t *bMsgRx) {
 	memcpy(&tmp[BASE_MESSAGE_SIZE], &msgLength, sizeof(uint32_t));
 	memcpy(&tmp[BASE_MESSAGE_SIZE + sizeof(uint32_t)], rendered, msgLength);
 
-    // send() can return less bytes than supplied length.
-    // Walk-around for robust implementation.
-//	int to_write = BASE_MESSAGE_SIZE + baseMsg.size;
 	int len = BASE_MESSAGE_SIZE + baseMsg.size;
-//	while (to_write > 0) {
-//		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
-//		if (written < 0) {
-//			ESP_LOGE(TAG, "Error occurred during sending server settings: %s", strerror(errno));
-//
-//			break;
-//		}
-//		to_write -= written;
-//	}
 	if (socket_send(TAG, client->sock, tmp, len) < 0) {
 		ESP_LOGE(TAG, "server settings not sent");
 
@@ -463,19 +407,7 @@ esp_err_t send_codec_header(snapclient_t *client, base_message_t *bMsgRx) {
 
 	free(codec_header_msg.codec);
 
-    // send() can return less bytes than supplied length.
-    // Walk-around for robust implementation.
-//	int to_write = BASE_MESSAGE_SIZE + baseMsg.size;
 	int len = BASE_MESSAGE_SIZE + baseMsg.size;
-//	while (to_write > 0) {
-//		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
-//		if (written < 0) {
-//			ESP_LOGE(TAG, "Error occurred during sending codec header: %s", strerror(errno));
-//
-//			break;
-//		}
-//		to_write -= written;
-//	}
 	if (socket_send(TAG, client->sock, tmp, len) < 0) {
 		ESP_LOGE(TAG, "codec header not sent");
 
@@ -525,19 +457,7 @@ esp_err_t send_time_message(snapclient_t *client, time_message_t *msg, base_mess
 	memcpy(&tmp[0], baseMsg_serialized, BASE_MESSAGE_SIZE);
 	memcpy(&tmp[BASE_MESSAGE_SIZE], &(msg->latency), sizeof(msg->latency));
 
-    // send() can return less bytes than supplied length.
-    // Walk-around for robust implementation.
-//	int to_write = BASE_MESSAGE_SIZE + baseMsg.size;
 	int len = BASE_MESSAGE_SIZE + baseMsg.size;
-//	while (to_write > 0) {
-//		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
-//		if (written < 0) {
-//			ESP_LOGE(TAG, "Error (%d) occurred during sending time message: %s", errno, strerror(errno));
-//
-//			break;
-//		}
-//		to_write -= written;
-//	}
 	if (socket_send(TAG, client->sock, tmp, len) < 0) {
 		ESP_LOGE(TAG, "time message not sent");
 
@@ -585,21 +505,7 @@ esp_err_t send_wire_chunk(snapclient_t *client, wire_chunk_message_t *msg) {
 	offset += sizeof(msg->size);
 	memcpy(&tmp[offset], msg->payload, msg->size);
 
-    // send() can return less bytes than supplied length.
-    // Walk-around for robust implementation.
-//	int to_write = BASE_MESSAGE_SIZE + baseMsg.size;
 	int len = BASE_MESSAGE_SIZE + baseMsg.size;
-//	while (to_write > 0) {
-//		int written = send(client->sock, tmp + (len - to_write), to_write, 0);
-//		if (written < 0) {
-//			ESP_LOGE(TAG, "Error (%d) occurred during sending wire chunk: %s", errno, strerror(errno));
-//
-//			err = ESP_FAIL;
-//
-//			break;
-//		}
-//		to_write -= written;
-//	}
 	if (socket_send(TAG, client->sock, tmp, len) < 0) {
 		ESP_LOGE(TAG, "wire chunk not sent");
 
@@ -640,14 +546,9 @@ esp_err_t send_initial_wire_chunks_all(snapclient_t *client)
 
 void send_new_wire_chunk_task( void *pvParameter)
 {
-//	int sock = *((int *)pvParameter);
 	snapclient_t *client = (snapclient_t *)pvParameter;
 	esp_err_t err = ESP_OK;
-//	TaskHandle_t handle = xTaskGetCurrentTaskHandle();
-//	TaskStatus_t taskDetails;
-
-	// Use the handle to obtain further information about the task.
-//	vTaskGetInfo( handle, &taskDetails, pdTRUE,  eInvalid );
+	char *tName = pcTaskGetName( xTaskGetCurrentTaskHandle() );
 
 	ESP_LOGI(TAG, "started %s: sock %d", __func__, client->sock);
 
@@ -662,10 +563,15 @@ void send_new_wire_chunk_task( void *pvParameter)
 	//		uint32_t val;
 			message_queue_t msg;
 
+//			ESP_LOGW(TAG, "%s: %d", tName,  uxTaskGetStackHighWaterMark(NULL));
+
 			xQueueReceive(client->msgQ, &msg, portMAX_DELAY);
 
-			if (msg.type == SNAPCAST_MESSAGE_WIRE_CHUNK)
-			{
+			if (msg.type == DLNA_MESSAGE_FULL) {
+//				send_codec_header(client, &msg.baseMsg);
+//				err = send_initial_wire_chunks_all(client);
+			}
+			else if (msg.type == SNAPCAST_MESSAGE_WIRE_CHUNK) {
 				wire_chunk_fifo_lock();
 				element = wire_chunk_fifo_get_newest();
 				if (element) {
@@ -715,6 +621,8 @@ static void handle_client_task(void *pvParameters)
     do {
     	char baseMsgBuffer[BASE_MESSAGE_SIZE];
 
+//    	ESP_LOGW(TAG, "%s: %d", tName,  uxTaskGetStackHighWaterMark(NULL));
+
     	size = BASE_MESSAGE_SIZE;
 //        len = recv(sock, baseMsgBuffer, size, 0);
         len = try_receive(TAG, sock , baseMsgBuffer, size);
@@ -760,16 +668,24 @@ static void handle_client_task(void *pvParameters)
 							{
 								hello_message_t helloMessage;
 								char *tmp = typedMsgBuffer;
-
+								message_queue_t msg;
 								char *str = deserialize_hello_msg(tmp, size, &helloMessage);
+
 								client = create_new_client(str, sock);
 
 								send_server_settings(client, &baseMessage);
 								send_codec_header(client, &baseMessage);
 
+//								// pass on to tx task to issue response
+//								msg.type = DLNA_MESSAGE_FULL;
+//								memcpy(&msg.baseMsg, &baseMessage, sizeof(baseMessage));
+//								if (client && client->msgQ) {
+//									xQueueSend(client->msgQ, &msg, portMAX_DELAY);
+//								}
+
 								char tName[32];
 								sprintf(tName, "nWcT_%d", sock);
-								xTaskCreatePinnedToCore(send_new_wire_chunk_task, (const char *)tName, 2 * 2048, (void*)client, 10, &client_tx_task_handle, tskNO_AFFINITY);
+								xTaskCreatePinnedToCore(send_new_wire_chunk_task, (const char *)tName, 1 * 2048, (void*)client, 10, &client_tx_task_handle, tskNO_AFFINITY);
 
 								break;
 							}
@@ -968,7 +884,7 @@ static void snapserver_task(void *pvParameters)
     													heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             char tName[32];
             sprintf(tName, "cTsk_%d", sock);
-            if (xTaskCreatePinnedToCore(handle_client_task, (const char *)tName, 4096, (void*)&sock, 10, NULL, tskNO_AFFINITY) != pdPASS) {
+            if (xTaskCreatePinnedToCore(handle_client_task, (const char *)tName, 4096 - 1920, (void*)&sock, 10, NULL, tskNO_AFFINITY) != pdPASS) {
             	ESP_LOGE(TAG, "Task %s couldn't be created", tName);
 
                 shutdown(sock, 0);

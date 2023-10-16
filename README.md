@@ -8,7 +8,7 @@ to get audio playback through [esp_snapclient](https://github.com/CarlosDerSeher
 
 It does loads of stuff currently:
 
-* DLNA audio (LPCM) input (Android App AirMusic) 
+* DLNA audio (WAV) input (Android App AirMusic) 
 
   as sample rate, bits and channels are hardcoded please ensure your device sends 44100:16:2
 * flac encoding PCM audio (44100:16:2)

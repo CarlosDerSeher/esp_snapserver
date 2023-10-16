@@ -142,7 +142,7 @@ static FLAC__StreamMetadata *metadata[2] = {NULL, NULL};
 static flac_codec_header_t flac_codecHeader = {0, NULL};
 static TaskHandle_t flac_encoder_task_handle = NULL;
 
-void flac_encoder_deinit(void);
+void flac_encoder_deinit(bool free_codec_header);
 void flac_encoder_init(void);
 
 
@@ -268,6 +268,8 @@ static void flac_encoder_task(void *pvParameters) {
 		return;
 	}
 
+
+
 //	ESP_LOGW(TAG, "frames: %ld", FLAC__stream_encoder_get_blocksize(encoder));
 
 //	uint32_t rounds = 0;
@@ -276,10 +278,16 @@ static void flac_encoder_task(void *pvParameters) {
 //	ESP_LOGI(TAG, "got rb %p handle", rb);
 //	bool start = false;
 
+	vTaskDelay(pdMS_TO_TICKS(100));		// give audio pipline tasks some cpu time to start up correct
+
+	ESP_LOGI(TAG, "Flac encoder task started");
+
 	while (1) {
 	    int16_t *item;
     	int16_t buffer[READSIZE * 2];
     	int length;
+
+    	//ESP_LOGW(TAG, "flac: %d",  uxTaskGetStackHighWaterMark(NULL));
 
 //    	ESP_LOGI(TAG, "rb_bytes_filled == %d", rb_bytes_filled(rb));
 //    	if (start == false) {
@@ -543,6 +551,8 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
         return 0;
     }
 
+//    ESP_LOGW(TAG, "dlna: %d",  uxTaskGetStackHighWaterMark(NULL));
+
     req_type = attr->type & 0xFF;
     switch (req_type) {
         case RCS_GET_MUTE:
@@ -571,7 +581,7 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
         case AVT_PLAY:
             ESP_LOGI(TAG, "Play with speed=%s trans_state %s", buffer, trans_state);
 
-            flac_encoder_deinit();
+            flac_encoder_deinit(false);
 
             audio_pipeline_stop(pipeline);
             audio_pipeline_wait_for_stop(pipeline);
@@ -599,7 +609,7 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
             audio_pipeline_wait_for_stop(pipeline);
             audio_pipeline_terminate(pipeline);
 
-        	flac_encoder_deinit();
+            flac_encoder_deinit(false);
 
             trans_state = "STOPPED";
             esp_dlna_notify_avt_by_action(dlna_handle, "TransportState");
@@ -695,6 +705,7 @@ int renderer_request(esp_dlna_handle_t dlna, const upnp_attr_t *attr, int attr_n
 static int _http_stream_event_handle(http_stream_event_msg_t *msg)
 {
 //	ESP_LOGW(TAG, "%s: msg->event_id [%d]", __func__, msg->event_id);
+//	ESP_LOGW(TAG, "http_stream: %d",  uxTaskGetStackHighWaterMark(NULL));
 
 	if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
 
@@ -727,7 +738,8 @@ static void audio_player_init(void)
     http_cfg.enable_playlist_parser = true;
 //    http_cfg.task_prio = 10;
     http_cfg.task_core = tskNO_AFFINITY;
-    http_cfg.stack_in_ext = true;
+    //http_cfg.stack_in_ext = true;
+    http_cfg.task_stack = 4 * 1024;
     http_cfg.out_rb_size = (44100 * 4 * 4) / 4;	// buffer for 4 * 0.25s
     http_stream_reader = http_stream_init(&http_cfg);
 
@@ -842,13 +854,13 @@ static void start_dlna(void) {
 //	}
 //}
 
-void flac_encoder_deinit(void)  {
+void flac_encoder_deinit(bool free_codec_header)  {
 	if (flac_encoder_task_handle) {
 		vTaskDelete(flac_encoder_task_handle);
 		flac_encoder_task_handle = NULL;
 	}
 
-	if (flac_codecHeader.payload) {
+	if (flac_codecHeader.payload && free_codec_header) {
 		free(flac_codecHeader.payload);
 		flac_codecHeader.payload = NULL;
 		flac_codecHeader.size = 0;
@@ -875,6 +887,8 @@ void flac_encoder_deinit(void)  {
 	wire_chunk_fifo_clear();
 
 	codecHeaderCounter = 0;
+
+	ESP_LOGI(TAG, "Flac encoder de-init done");
 }
 
 /**
@@ -887,8 +901,6 @@ void flac_encoder_init(void) {
 	FLAC__bool ok = true;
 	FLAC__StreamEncoderInitStatus init_status;
 	FLAC__StreamMetadata_VorbisComment_Entry entry;
-
-	flac_encoder_deinit();
 
 	/* allocate the encoder */
 	if((encoder = FLAC__stream_encoder_new()) == NULL) {
@@ -947,7 +959,9 @@ void flac_encoder_init(void) {
 	queue_length = ceil((float)SNAPSERVER_BUFFER_MS / (((float)flackBlockSize / (float)sample_rate) * 1000.0));
 	ESP_ERROR_CHECK( wire_chunk_fifo_init(queue_length, SNAPSERVER_BUFFER_MS) );
 
-	xTaskCreatePinnedToCore(flac_encoder_task, "encoder", 4096*4, NULL, 9, &flac_encoder_task_handle, tskNO_AFFINITY);
+	ESP_LOGI(TAG, "Flac encoder init done");
+
+	xTaskCreatePinnedToCore(flac_encoder_task, "encoder", 4096*2, NULL, 9, &flac_encoder_task_handle, tskNO_AFFINITY);
 }
 
 static void event_handler(void* arg, esp_event_base_t event_base,
@@ -1067,6 +1081,7 @@ void app_main()
 
     start_dlna();
 
+    flac_encoder_deinit(true);
     flac_encoder_init();
 
     snapserver_init();
